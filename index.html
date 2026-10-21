@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Office Automation</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <header id="app-header"></header>
+  <main class="home">
+    <h1>Office Automation</h1>
+    <p>Pick a task, fill in the details, preview the slide, and download it as an editable PowerPoint file.</p>
+    <div class="cards" id="cards"></div>
+  </main>
+
+  <script src="js/common.js"></script>
+  <script>
+    document.getElementById('cards').append(...TOOLS.map((t) =>
+      App.el('a', { class: 'card', href: t.href },
+        App.el('div', { class: 'icon' }, t.icon),
+        App.el('h2', {}, t.name),
+        App.el('p', {}, t.desc))));
+  </script>
+</body>
+</html>

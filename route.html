@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Route Planner · Office Automation</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <header id="app-header"></header>
+  <main class="tool">
+    <section class="panel">
+      <h1>Route Planner</h1>
+      <p class="lead">Enter two places and fetch the route from Google Maps, or type the journey legs yourself. Everything below stays editable.</p>
+
+      <div class="grid">
+        <label class="field full">From
+          <input type="text" id="origin" placeholder="e.g. London Paddington Station">
+        </label>
+        <label class="field full">To
+          <input type="text" id="destination" placeholder="e.g. Canary Wharf, London">
+        </label>
+        <label class="field">Main mode
+          <select id="mode">
+            <option value="TRANSIT">Public transport</option>
+            <option value="DRIVE">Car</option>
+            <option value="WALK">Walking</option>
+            <option value="BICYCLE">Bicycle</option>
+            <option value="TWO_WHEELER">Motorbike / scooter</option>
+          </select>
+        </label>
+        <label class="field">Departure (optional)
+          <input type="datetime-local" id="departure">
+        </label>
+        <div class="field full">Also compare
+          <div class="checks" id="compare"></div>
+        </div>
+        <label class="field">Units
+          <select id="units">
+            <option value="METRIC">Kilometres</option>
+            <option value="IMPERIAL">Miles</option>
+          </select>
+        </label>
+      </div>
+
+      <div class="actions">
+        <button class="btn primary" id="fetch">Get route from Google Maps</button>
+        <a class="btn" id="gmapsLink" target="_blank" rel="noopener">Open in Google Maps ↗</a>
+      </div>
+      <div class="status" id="status"></div>
+
+      <details class="settings" id="keyBox">
+        <summary>Google Maps API key</summary>
+        <p>Needed only for “Get route”. The key needs <b>Routes API</b> and <b>Maps Static API</b> enabled. It is stored only in this browser.</p>
+        <input type="password" id="apiKey" placeholder="AIza…">
+      </details>
+
+      <h3>Slide text</h3>
+      <div class="grid">
+        <label class="field full">Title
+          <input type="text" id="title" placeholder="Defaults to From → To">
+        </label>
+        <label class="field full">Subtitle
+          <input type="text" id="subtitle" placeholder="e.g. By public transport · 42 min · 12.4 km">
+        </label>
+      </div>
+
+      <h3>Map image</h3>
+      <div class="actions" style="margin-top:0">
+        <label class="btn small">Upload image… <input type="file" id="mapUpload" accept="image/*" hidden></label>
+        <button class="btn small" id="mapRemove">Remove</button>
+      </div>
+      <img id="mapThumb" class="map-thumb" alt="Map" hidden>
+
+      <h3>Journey legs</h3>
+      <div class="table-scroll">
+        <table class="edit-table">
+          <thead><tr><th>Mode</th><th>From</th><th>To</th><th>Details</th><th>Time</th><th>Dist.</th><th></th></tr></thead>
+          <tbody id="legs"></tbody>
+        </table>
+      </div>
+      <div class="actions"><button class="btn small" id="addLeg">+ Add leg</button></div>
+
+      <h3>Mode comparison</h3>
+      <div class="table-scroll">
+        <table class="edit-table">
+          <thead><tr><th>Mode</th><th>Time</th><th>Distance</th><th></th></tr></thead>
+          <tbody id="comparison"></tbody>
+        </table>
+      </div>
+      <div class="actions"><button class="btn small" id="addCmp">+ Add row</button></div>
+    </section>
+
+    <section class="panel preview-panel">
+      <div class="preview-head">
+        <h2>Preview</h2>
+        <button class="btn primary" id="download">Download .pptx</button>
+      </div>
+      <div class="preview" id="preview"></div>
+      <p class="hint">Map is a picture; legs, labels and the comparison table are editable shapes and text in PowerPoint.</p>
+    </section>
+  </main>
+
+  <script src="https://cdn.jsdelivr.net/npm/pptxgenjs@3.12.0/dist/pptxgen.bundle.js"></script>
+  <script src="js/common.js"></script>
+  <script src="js/slide-engine.js"></script>
+  <script src="js/route.js"></script>
+</body>
+</html>
