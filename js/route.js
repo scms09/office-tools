@@ -1,46 +1,31 @@
 /*
- * Route Planner: Google Routes API -> editable journey legs -> slide.
- * Slide layout lives in buildSlides(): map on the left, legs + comparison on the right.
+ * Route Planner: compares train all the way, train part of the way + car, and
+ * car all the way, recommends one, and lays the chosen journey out on a slide
+ * (map on the left, legs + comparison on the right).
+ * Train/car look-ups live in js/transit.js; API keys come from the Trip Schedule page.
  */
 (function () {
-  const KEY = 'route.draft.v1';
-  const API_KEY = 'gmaps.apiKey';
+  const KEY = 'route.draft.v2';
+  const MIN_SAVING_MIN = 15; // train + car must save this much over train only to be recommended
+  const MAX_CAR_STATIONS = 8; // stations checked for a car drive (one Google request each)
 
-  const TRAVEL_MODES = { TRANSIT: 'Public transport', DRIVE: 'Car', WALK: 'Walking', BICYCLE: 'Bicycle', TWO_WHEELER: 'Motorbike' };
-  const GMAPS_MODE = { TRANSIT: 'transit', DRIVE: 'driving', WALK: 'walking', BICYCLE: 'bicycling', TWO_WHEELER: 'driving' };
-  const LEG_FOR_MODE = { DRIVE: 'Car', WALK: 'Walk', BICYCLE: 'Bike', TWO_WHEELER: 'Motorbike' };
   // Badge colour for each leg mode on the slide.
   const LEG_MODES = {
     Walk: '6B7280', Train: 'C0392B', Subway: '8E44AD', Bus: '27AE60', Tram: 'D35400', Ferry: '2980B9',
     Car: '2E86DE', Taxi: 'B7950B', Bike: 'F39C12', Motorbike: '16A085', Flight: '34495E', Other: '7F8C8D',
   };
-  const VEHICLE = {
-    BUS: 'Bus', INTERCITY_BUS: 'Bus', TROLLEYBUS: 'Bus',
-    SUBWAY: 'Subway', METRO_RAIL: 'Subway',
-    RAIL: 'Train', HEAVY_RAIL: 'Train', COMMUTER_TRAIN: 'Train', HIGH_SPEED_TRAIN: 'Train', LONG_DISTANCE_TRAIN: 'Train', MONORAIL: 'Train',
-    TRAM: 'Tram', LIGHT_RAIL: 'Tram', CABLE_CAR: 'Tram', FUNICULAR: 'Tram', GONDOLA_LIFT: 'Tram',
-    FERRY: 'Ferry', SHARE_TAXI: 'Taxi',
-  };
-  const FIELDS = [
-    'routes.duration', 'routes.distanceMeters', 'routes.polyline.encodedPolyline', 'routes.localizedValues',
-    'routes.legs.steps.travelMode', 'routes.legs.steps.staticDuration', 'routes.legs.steps.distanceMeters', 'routes.legs.steps.transitDetails',
-  ].join(',');
 
   const defaults = () => ({
-    origin: '', destination: '', mode: 'TRANSIT', compare: ['DRIVE', 'WALK'], departure: '', units: 'METRIC',
+    origin: '', destination: '', via: '', date: '', time: '09:00', timeMode: 'leave',
+    tz: App.store.get('trip.draft.v1', {}).tz || Transit.browserTz, pickup: 10, units: 'METRIC',
     title: '', subtitle: '', map: null, legs: [], comparison: [],
   });
   const state = { ...defaults(), ...App.store.get(KEY, {}) };
+  let options = []; // last comparison (not saved)
 
   const $ = (id) => document.getElementById(id);
-
-  // ---------- Formatting ----------
-  const secs = (d) => parseInt(String(d || '0').replace('s', ''), 10) || 0;
-  function fmtDur(s) {
-    const m = Math.round(s / 60);
-    if (m < 60) return `${Math.max(m, 1)} min`;
-    return `${Math.floor(m / 60)} h ${m % 60 ? (m % 60) + ' min' : ''}`.trim();
-  }
+  const hm = (d) => Transit.utcToZoned(d, state.tz).time;
+  const durMin = (o) => Math.round((o.arr - o.dep) / 60000);
   function fmtDist(meters) {
     if (state.units === 'IMPERIAL') {
       const mi = meters / 1609.34;
@@ -49,82 +34,235 @@
     return meters < 1000 ? `${Math.round(meters)} m` : `${(meters / 1000).toFixed(1)} km`;
   }
 
-  // ---------- Google APIs ----------
-  async function computeRoute(travelMode, key) {
-    const body = {
-      origin: { address: state.origin }, destination: { address: state.destination },
-      travelMode, languageCode: 'en', units: state.units,
-    };
-    if (state.departure && travelMode === 'TRANSIT') {
-      const d = new Date(state.departure);
-      if (d > new Date()) body.departureTime = d.toISOString();
-    }
-    const res = await fetch('https://routes.googleapis.com/directions/v2:computeRoutes', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': key, 'X-Goog-FieldMask': FIELDS },
-      body: JSON.stringify(body),
-    });
-    const json = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error((json.error && json.error.message) || res.statusText);
-    if (!json.routes || !json.routes.length) {
-      throw new Error(travelMode === 'TRANSIT'
-        ? 'No public transport route found. Google does not provide train timetables for some countries (e.g. Japan) through its API — use "Open in Google Maps" and type the legs in.'
-        : `No ${TRAVEL_MODES[travelMode].toLowerCase()} route found`);
-    }
-    return json.routes[0];
+  // ---------- Comparing the options ----------
+
+  // Stations along the train routes where you could get off and take a car for
+  // the last stretch: only those within about a third of the trip (5–25 km) of
+  // the destination, otherwise "train one stop, then drive" is just driving.
+  // With a preferred station, only stations reached after it count (the station
+  // itself always does). Ranked by a rough guess (straight line at ~35 km/h) so
+  // only the most promising ones cost a Google request.
+  function carStations(routes, start, goal, viaCoord) {
+    const radius = Math.max(5, Math.min(25, Transit.km(start, goal) / 3));
+    const best = new Map();
+    routes.forEach((route) => route.legs.forEach((leg, legIndex) => {
+      if (leg.kind !== 'ride') return;
+      [...leg.stops, { name: leg.to, coord: leg.toCoord, arr: leg.arr }].forEach((s) => {
+        if (!s.name || !s.coord) return;
+        const isVia = viaCoord && Transit.km(s.coord, viaCoord) < 1;
+        if (!isVia && Transit.km(s.coord, goal) > radius) return;
+        if (route.viaArr && s.arr < route.viaArr - 60000) return; // before the preferred station
+        const guess = (s.arr - route.dep) + (Transit.km(s.coord, goal) / 35) * 3600e3;
+        const prev = best.get(s.name);
+        if (!prev || guess < prev.guess) best.set(s.name, { ...s, route, legIndex, guess });
+      });
+    }));
+    return [...best.values()].sort((a, b) => a.guess - b.guess).slice(0, MAX_CAR_STATIONS);
   }
 
-  const routeDuration = (r) => (r.localizedValues && r.localizedValues.duration && r.localizedValues.duration.text) || fmtDur(secs(r.duration));
-  const routeDistance = (r) => (r.localizedValues && r.localizedValues.distance && r.localizedValues.distance.text) || fmtDist(r.distanceMeters || 0);
-
-  // Transit routes become one leg per vehicle ride, with consecutive walking steps merged.
-  // Other modes are a single door-to-door leg.
-  function legsFromRoute(route, mode) {
-    if (mode !== 'TRANSIT') {
-      return [{ mode: LEG_FOR_MODE[mode], from: state.origin, to: state.destination, detail: '', duration: routeDuration(route), distance: routeDistance(route) }];
-    }
-    const out = [];
-    (route.legs || []).flatMap((l) => l.steps || []).forEach((s) => {
-      const t = s.transitDetails;
-      if (s.travelMode === 'TRANSIT' && t) {
-        const line = t.transitLine || {};
-        const stops = t.stopDetails || {};
-        const dep = t.localizedValues && t.localizedValues.departureTime && t.localizedValues.departureTime.time && t.localizedValues.departureTime.time.text;
-        out.push({
-          mode: VEHICLE[line.vehicle && line.vehicle.type] || 'Other',
-          from: (stops.departureStop && stops.departureStop.name) || '',
-          to: (stops.arrivalStop && stops.arrivalStop.name) || '',
-          detail: [line.nameShort || line.name, t.headsign && `towards ${t.headsign}`, t.stopCount && `${t.stopCount} stops`, dep && `dep ${dep}`].filter(Boolean).join(' · '),
-          _s: secs(s.staticDuration), _m: s.distanceMeters || 0,
-        });
-      } else {
-        const last = out[out.length - 1];
-        if (last && last._walk) { last._s += secs(s.staticDuration); last._m += s.distanceMeters || 0; }
-        else out.push({ mode: 'Walk', from: '', to: '', detail: '', _walk: true, _s: secs(s.staticDuration), _m: s.distanceMeters || 0 });
-      }
+  // The best "train to a station, then car" journey, or null.
+  async function trainPlusCar(routes, start, goal, viaCoord) {
+    const stations = carStations(routes, start, goal, viaCoord);
+    const drives = await Promise.allSettled(stations.map((s) => Transit.drive(s.coord, goal)));
+    let best = null;
+    stations.forEach((s, i) => {
+      const d = drives[i].status === 'fulfilled' && drives[i].value;
+      if (!d) return;
+      const carDep = new Date(s.arr.getTime() + state.pickup * 60000);
+      const arr = new Date(carDep.getTime() + d.secs * 1000);
+      if (!best || arr - s.route.dep < best.arr - best.s.route.dep) best = { s, d, carDep, arr };
     });
-    out.forEach((l, i) => {
-      if (!l._walk) return;
-      l.from = i === 0 ? state.origin : out[i - 1].to;
-      l.to = i === out.length - 1 ? state.destination : out[i + 1].from;
-    });
-    return out.map(({ _s, _m, _walk, ...l }) => ({ ...l, duration: fmtDur(_s), distance: fmtDist(_m) }));
-  }
-
-  function staticMapUrl(polyline, key) {
-    const q = [
-      'size=620x560', 'scale=2', 'maptype=roadmap',
-      `path=${encodeURIComponent(`color:0x2E86DEff|weight:5|enc:${polyline}`)}`,
-      `markers=${encodeURIComponent(`color:green|label:A|${state.origin}`)}`,
-      `markers=${encodeURIComponent(`color:red|label:B|${state.destination}`)}`,
-      `key=${encodeURIComponent(key)}`,
+    if (!best) return null;
+    const { s, d } = best;
+    const ride = s.route.legs[s.legIndex];
+    const legs = [
+      ...s.route.legs.slice(0, s.legIndex),
+      { ...ride, to: s.name, toCoord: s.coord, arr: s.arr, meters: ride.to === s.name ? ride.meters : 0, stops: ride.stops.filter((x) => x.arr < s.arr) },
+      { kind: 'car', mode: 'Car', line: '', from: s.name, to: state.destination, fromCoord: s.coord, toCoord: goal, dep: best.carDep, arr: best.arr, meters: d.meters, polyline: d.polyline, wait: state.pickup },
     ];
+    return { ...s.route, legs, arr: best.arr, fare: '', via: s.name };
+  }
+
+  function carOnly(car, when) {
+    const dep = state.timeMode === 'arrive' ? new Date(when.getTime() - car.secs * 1000) : when;
+    const arr = new Date(dep.getTime() + car.secs * 1000);
+    return { source: 'Google', dep, arr, fare: '', legs: [{ kind: 'car', mode: 'Car', line: '', from: state.origin, to: state.destination, fromCoord: car.start, toCoord: car.goal, dep, arr, meters: car.meters, polyline: car.polyline }] };
+  }
+
+  // Train all the way + the best train-and-car journey for a set of train routes.
+  async function trainOptions(routes, car, viaCoord) {
+    if (!routes.length) return {};
+    const train = routes.reduce((a, b) => ((b.arr - b.dep) < (a.arr - a.dep) ? b : a));
+    const combo = await trainPlusCar(routes, car.start, car.goal, viaCoord);
+    return { train, combo };
+  }
+
+  // Train + car is recommended only when it saves enough time over train only.
+  function pickRecommended(trainOpt, comboOpt) {
+    if (trainOpt && comboOpt) comboOpt.saving = durMin(trainOpt.route) - durMin(comboOpt.route);
+    if (comboOpt && comboOpt.saving >= MIN_SAVING_MIN) return comboOpt;
+    return trainOpt || comboOpt || null;
+  }
+
+  async function compareRoutes() {
+    ['origin', 'destination', 'via', 'date', 'time'].forEach((id) => { state[id] = $(id).value.trim(); });
+    if (!Transit.keys().google) { $('keyNote').hidden = false; setStatus('Add your Google Maps API key on the Trip Schedule page first.', true); return; }
+    if (!state.origin || !state.destination || !state.date || !state.time) { setStatus('Fill in From, To, Date and Time.', true); return; }
+
+    const btn = $('compare');
+    btn.disabled = true;
+    options = [];
+    renderOptions();
+    setStatus('Looking up trains…');
+    try {
+      const search = { from: state.origin, to: state.destination, date: state.date, time: state.time, mode: state.timeMode, tz: state.tz };
+      const res = await Transit.trainRoutes(search, setStatus);
+      const car = res.car || await Transit.drive(state.origin, state.destination);
+      if (!car) { setStatus('Google could not find one of these places. Try adding the city or country.', true); return; }
+
+      // Preferred station: find where it is, then trains that pass through it.
+      let viaRes = null, viaCoord = null;
+      if (state.via) {
+        setStatus(`Finding ${state.via}…`);
+        const viaPlace = await Transit.drive(state.via, car.goal);
+        if (!viaPlace) { setStatus(`Google could not find "${state.via}". Try adding the city, e.g. "Kawagoe Station, Saitama".`, true); return; }
+        viaCoord = viaPlace.start;
+        setStatus(`Looking up trains via ${state.via}…`);
+        viaRes = await Transit.trainRoutes({ ...search, via: { name: state.via, coord: viaCoord } }, setStatus);
+      }
+
+      setStatus('Checking drive times from stations along the way…');
+      const base = await trainOptions(res.routes || [], car, null);
+      const when = Transit.zonedToUtc(state.date, state.time, state.tz);
+      const carOpt = { id: 'car', title: 'Car all the way', route: carOnly(car, when) };
+
+      if (viaRes) {
+        const pref = await trainOptions(viaRes.routes || [], car, viaCoord);
+        const trainOpt = pref.train && { id: 'train', title: `Train via ${state.via}`, route: pref.train };
+        const comboOpt = pref.combo && {
+          id: 'combo', route: pref.combo,
+          title: Transit.km(pref.combo.legs[pref.combo.legs.length - 1].fromCoord, viaCoord) < 1
+            ? `Train to ${pref.combo.via} + car` : `Train via ${state.via} to ${pref.combo.via} + car`,
+        };
+        const rec = pickRecommended(trainOpt, comboOpt);
+        // For reference: the best way when not going through the preferred station.
+        const plainRec = pickRecommended(base.train && { id: 'train', title: 'Train all the way', route: base.train },
+          base.combo && { id: 'combo', title: `Train to ${base.combo.via} + car`, route: base.combo });
+        const ref = plainRec && { id: 'ref', title: `Not via ${state.via}: ${plainRec.title}`, route: plainRec.route };
+        options = [trainOpt, comboOpt, carOpt, ref].filter(Boolean);
+        if (rec) rec.recommended = true;
+        if (ref && rec) ref.diff = durMin(ref.route) - durMin(rec.route);
+        if (!trainOpt && !comboOpt) setStatus(`No trains found via ${state.via} for that time.`, true);
+      } else {
+        const trainOpt = base.train && { id: 'train', title: 'Train all the way', route: base.train };
+        const comboOpt = base.combo && { id: 'combo', title: `Train to ${base.combo.via} + car`, route: base.combo };
+        const rec = pickRecommended(trainOpt, comboOpt);
+        options = [trainOpt, comboOpt, carOpt].filter(Boolean);
+        if (rec) rec.recommended = true;
+        else carOpt.recommended = true;
+      }
+      const fastest = options.reduce((a, b) => (durMin(b.route) < durMin(a.route) ? b : a));
+      fastest.fastest = true;
+
+      const anyTrains = options.some((o) => o.id === 'train' || o.id === 'combo');
+      const leftCount = (viaRes && viaRes.left) || res.left;
+      const left = leftCount != null ? ` NAVITIME searches left this month: ${leftCount}.` : '';
+      if (anyTrains) setStatus(`Trains from ${(viaRes || res).source}.${left} Pick an option to put it on the slide.`);
+      else if (!state.via) setStatus(`${Transit.reasonText(res.reason)} Showing the car option only.`, true);
+      renderOptions();
+    } catch (err) {
+      setStatus(err.message, true);
+    } finally {
+      btn.disabled = false;
+      App.store.set(KEY, state);
+    }
+  }
+
+  // ---------- Option cards ----------
+  function legLine(l) {
+    if (l.kind === 'walk') return `Walk ${Transit.fmtDur((l.arr - l.dep) / 1000)}`;
+    if (l.kind === 'car') return `Car ${hm(l.dep)} → ${hm(l.arr)}: ${l.from} → ${l.to} (${fmtDist(l.meters)}${l.wait ? `, after ${l.wait} min to get a car` : ''})`;
+    return `${l.line} ${hm(l.dep)} → ${hm(l.arr)}: ${l.from} → ${l.to}`;
+  }
+
+  function optionNote(o) {
+    if (o.id === 'combo' && o.saving != null) return o.saving > 0 ? `${o.saving} min faster than train only` : `${-o.saving} min slower than train only`;
+    if (o.id === 'ref' && o.diff != null) return o.diff < 0 ? `${-o.diff} min faster than the recommended route` : o.diff > 0 ? `${o.diff} min slower than the recommended route` : 'same time as the recommended route';
+    if (o.id === 'car') return fmtDist(o.route.legs[0].meters);
+    return o.route.fare || '';
+  }
+
+  function renderOptions() {
+    const box = $('options');
+    box.innerHTML = '';
+    options.forEach((o) => {
+      const badges = [o.recommended && App.el('span', { class: 'badge rec' }, 'Recommended'), o.fastest && App.el('span', { class: 'badge' }, 'Fastest')].filter(Boolean);
+      box.appendChild(App.el('div', { class: 'opt-card' + (o.recommended ? ' recommended' : '') },
+        App.el('div', { class: 'opt-head' },
+          App.el('div', {}, App.el('b', {}, o.title), ' ', badges),
+          App.el('button', { type: 'button', class: 'btn small' + (o.recommended ? ' primary' : ''), onclick: () => useOption(o) }, 'Use on slide')),
+        App.el('div', { class: 'opt-time' }, `${hm(o.route.dep)} → ${hm(o.route.arr)} · ${Transit.fmtDur((o.route.arr - o.route.dep) / 1000)}`, optionNote(o) ? ` · ${optionNote(o)}` : ''),
+        App.el('ul', { class: 'opt-legs' }, o.route.legs.map((l) => App.el('li', {}, legLine(l))))));
+    });
+    if (options.some((o) => o.id === 'combo')) {
+      box.appendChild(App.el('p', { class: 'hint' }, `Train + car is recommended only when it saves at least ${MIN_SAVING_MIN} minutes. The ${state.pickup} min to get a car (taxi wait) is included.`));
+    }
+  }
+
+  function legRow(l, i, legs) {
+    return {
+      mode: l.mode,
+      from: l.from || (i === 0 ? state.origin : ''),
+      to: l.to || (i === legs.length - 1 ? state.destination : ''),
+      detail: l.kind === 'ride' ? l.line : l.kind === 'car' && l.wait ? `after ${l.wait} min to get a car` : '',
+      duration: Transit.fmtDur((l.arr - l.dep) / 1000),
+      distance: l.meters ? fmtDist(l.meters) : '',
+    };
+  }
+
+  async function useOption(o) {
+    const r = o.route;
+    state.legs = r.legs.map(legRow);
+    state.comparison = options.map((x) => ({ mode: x.title + (x.recommended ? ' ★' : ''), duration: Transit.fmtDur((x.route.arr - x.route.dep) / 1000), distance: optionNote(x) }));
+    state.subtitle = `${o.title} · ${hm(r.dep)} → ${hm(r.arr)} · ${Transit.fmtDur((r.arr - r.dep) / 1000)}`;
+    $('subtitle').value = state.subtitle;
+    renderTables();
+    refresh();
+    try {
+      state.map = await loadImage(staticMapUrl(r));
+      refresh();
+      setStatus(`"${o.title}" is on the slide. Edit anything below before downloading.`);
+    } catch {
+      setStatus(`"${o.title}" is on the slide. The map picture could not be loaded (Maps Static API may need enabling) — you can upload a screenshot instead.`, true);
+    }
+  }
+
+  // Map picture: train lines in red, walks in grey, car in blue; A = start, B = end, C = where the car starts.
+  function staticMapUrl(route) {
+    const pt = (c) => `${c.lat.toFixed(5)},${c.lng.toFixed(5)}`;
+    const q = ['size=620x560', 'scale=2', 'maptype=roadmap'];
+    route.legs.forEach((l) => {
+      if (l.kind === 'car') {
+        if (l.polyline) q.push('path=' + encodeURIComponent(`color:0x2E86DEff|weight:5|enc:${l.polyline}`));
+        return;
+      }
+      const seq = [l.fromCoord, ...l.stops.map((s) => s.coord), l.toCoord].filter(Boolean);
+      if (seq.length > 1) q.push('path=' + encodeURIComponent(`${l.kind === 'walk' ? 'color:0x6B7280ff|weight:3' : 'color:0xC0392Bff|weight:5'}|${seq.map(pt).join('|')}`));
+    });
+    const first = route.legs[0].fromCoord, last = route.legs[route.legs.length - 1].toCoord;
+    if (first) q.push('markers=' + encodeURIComponent(`color:green|label:A|${pt(first)}`));
+    if (last) q.push('markers=' + encodeURIComponent(`color:red|label:B|${pt(last)}`));
+    const carLeg = route.legs.find((l) => l.kind === 'car');
+    if (carLeg && carLeg !== route.legs[0] && carLeg.fromCoord) q.push('markers=' + encodeURIComponent(`color:blue|label:C|${pt(carLeg.fromCoord)}`));
+    q.push('key=' + encodeURIComponent(Transit.keys().google));
     return 'https://maps.googleapis.com/maps/api/staticmap?' + q.join('&');
   }
 
   // Reads an image (URL or File) into { data: dataURL, w, h } so it can be embedded in the .pptx.
   async function loadImage(src) {
-    const blob = src instanceof Blob ? src : await (await fetch(src)).blob();
+    const res = src instanceof Blob ? null : await fetch(src);
+    if (res && !res.ok) throw new Error('Map image request failed');
+    const blob = src instanceof Blob ? src : await res.blob();
     const data = await new Promise((resolve, reject) => {
       const r = new FileReader();
       r.onload = () => resolve(r.result);
@@ -134,42 +272,6 @@
     const img = new Image();
     await new Promise((resolve, reject) => { img.onload = resolve; img.onerror = () => reject(new Error('Not a valid image')); img.src = data; });
     return { data, w: img.naturalWidth, h: img.naturalHeight };
-  }
-
-  async function fetchRoute() {
-    const key = $('apiKey').value.trim();
-    if (!key) { $('keyBox').open = true; setStatus('Add a Google Maps API key first (or fill in the legs manually).', true); return; }
-    if (!state.origin || !state.destination) { setStatus('Enter both From and To.', true); return; }
-
-    const btn = $('fetch');
-    btn.disabled = true;
-    setStatus('Fetching route…');
-    try {
-      const main = await computeRoute(state.mode, key);
-      state.legs = legsFromRoute(main, state.mode);
-      state.subtitle = `By ${TRAVEL_MODES[state.mode].toLowerCase()} · ${routeDuration(main)} · ${routeDistance(main)}`;
-
-      const modes = [state.mode, ...state.compare.filter((m) => m !== state.mode)];
-      const results = await Promise.allSettled(modes.map((m) => (m === state.mode ? Promise.resolve(main) : computeRoute(m, key))));
-      state.comparison = modes.map((m, i) => results[i].status === 'fulfilled'
-        ? { mode: TRAVEL_MODES[m], duration: routeDuration(results[i].value), distance: routeDistance(results[i].value) }
-        : { mode: TRAVEL_MODES[m], duration: 'n/a', distance: '' });
-      if (state.comparison.length < 2) state.comparison = [];
-
-      let note = '';
-      if (main.polyline && main.polyline.encodedPolyline) {
-        try { state.map = await loadImage(staticMapUrl(main.polyline.encodedPolyline, key)); }
-        catch { note = ' Map image could not be loaded — check that Maps Static API is enabled, or upload a screenshot.'; }
-      }
-      syncInputs();
-      renderTables();
-      refresh();
-      setStatus('Route loaded. Edit anything below before downloading.' + note, !!note);
-    } catch (err) {
-      setStatus('Google Maps: ' + err.message, true);
-    } finally {
-      btn.disabled = false;
-    }
   }
 
   // ---------- Slide ----------
@@ -184,7 +286,7 @@
       els.push({ type: 'image', ...mapBox, data: state.map.data, imgW: state.map.w, imgH: state.map.h });
     } else {
       els.push({ type: 'rect', ...mapBox, fill: T.light, line: T.border });
-      els.push({ type: 'text', ...mapBox, text: 'Map\nFetch a route or upload an image', align: 'center', valign: 'middle', fontSize: 14, color: T.muted });
+      els.push({ type: 'text', ...mapBox, text: 'Map\nPick an option or upload an image', align: 'center', valign: 'middle', fontSize: 14, color: T.muted });
     }
 
     const rx = 6.8, rw = SlideKit.W - 0.4 - rx;
@@ -199,7 +301,7 @@
     const avail = bottom - y - (cmp.length ? cmpH + 0.25 : 0);
 
     if (!legs.length) {
-      els.push({ type: 'text', x: rx, y, w: rw, h: 0.5, text: 'Add journey legs on the left.', fontSize: 12, italic: true, color: T.muted, margin: 0 });
+      els.push({ type: 'text', x: rx, y, w: rw, h: 0.5, text: 'Compare routes and pick an option, or add legs on the left.', fontSize: 12, italic: true, color: T.muted, margin: 0 });
     }
     const lh = legs.length ? Math.min(0.8, avail / legs.length) : 0;
     const k = Math.min(1, lh / 0.7); // shrink text when there are many legs
@@ -216,10 +318,10 @@
 
     if (cmp.length) {
       const cy = bottom - cmpH;
-      els.push({ type: 'text', x: rx, y: cy, w: rw, h: 0.4, text: 'Mode comparison', fontSize: 16, bold: true, color: T.primary, margin: 0 });
+      els.push({ type: 'text', x: rx, y: cy, w: rw, h: 0.4, text: 'Options compared', fontSize: 16, bold: true, color: T.primary, margin: 0 });
       els.push({
-        type: 'table', x: rx, y: cy + 0.45, w: rw, colW: [rw * 0.44, rw * 0.28, rw * 0.28], rowH: cmpRowH, fontSize: 11, header: true, zebra: true,
-        rows: [['Mode', 'Time', 'Distance'], ...cmp.map((c) => [c.mode, c.duration, c.distance])],
+        type: 'table', x: rx, y: cy + 0.45, w: rw, colW: [rw * 0.5, rw * 0.22, rw * 0.28], rowH: cmpRowH, fontSize: 11, header: true, zebra: true,
+        rows: [['Option', 'Time', 'Notes'], ...cmp.map((c) => [c.mode, c.duration, c.distance])],
       });
     }
     return [{ elements: els }];
@@ -241,7 +343,7 @@
   }
 
   function updateGmapsLink() {
-    const p = new URLSearchParams({ api: '1', origin: state.origin, destination: state.destination, travelmode: GMAPS_MODE[state.mode] });
+    const p = new URLSearchParams({ api: '1', origin: state.origin, destination: state.destination, travelmode: 'transit' });
     $('gmapsLink').href = 'https://www.google.com/maps/dir/?' + p.toString();
   }
 
@@ -281,36 +383,23 @@
       { key: 'distance', width: '60px' },
     ]);
     editableRows('comparison', state.comparison, [
-      { key: 'mode', placeholder: 'e.g. Car' },
+      { key: 'mode', placeholder: 'e.g. Train all the way' },
       { key: 'duration' },
       { key: 'distance' },
     ]);
   }
 
-  const FIELDS_IN_FORM = ['origin', 'destination', 'mode', 'departure', 'units', 'title', 'subtitle'];
-  function syncInputs() { FIELDS_IN_FORM.forEach((id) => { $(id).value = state[id] || ''; }); }
+  const FIELDS_IN_FORM = ['origin', 'destination', 'via', 'date', 'time', 'timeMode', 'tz', 'pickup', 'units', 'title', 'subtitle'];
 
   function init() {
-    syncInputs();
-    FIELDS_IN_FORM.forEach((id) => $(id).addEventListener('input', () => { state[id] = $(id).value; refresh(); }));
-
-    const cmpBox = $('compare');
-    Object.entries(TRAVEL_MODES).forEach(([m, label]) => {
-      const cb = App.el('input', { type: 'checkbox', value: m });
-      cb.checked = state.compare.includes(m);
-      cb.addEventListener('change', () => {
-        state.compare = [...cmpBox.querySelectorAll('input:checked')].map((c) => c.value);
-        refresh();
-      });
-      cmpBox.appendChild(App.el('label', {}, cb, label));
+    try { $('tzList').append(...Intl.supportedValuesOf('timeZone').map((z) => App.el('option', { value: z }))); } catch { /* older browsers */ }
+    FIELDS_IN_FORM.forEach((id) => {
+      $(id).value = state[id] ?? '';
+      $(id).addEventListener('input', () => { state[id] = id === 'pickup' ? Number($(id).value) || 0 : $(id).value; refresh(); });
     });
+    $('keyNote').hidden = !!Transit.keys().google;
 
-    const key = $('apiKey');
-    key.value = App.store.get(API_KEY, '');
-    key.addEventListener('input', () => App.store.set(API_KEY, key.value.trim()));
-    if (!key.value) $('keyBox').open = true;
-
-    $('fetch').addEventListener('click', fetchRoute);
+    $('compare').addEventListener('click', compareRoutes);
     $('addLeg').addEventListener('click', () => { state.legs.push({ mode: 'Walk', from: '', to: '', detail: '', duration: '', distance: '' }); renderTables(); refresh(); });
     $('addCmp').addEventListener('click', () => { state.comparison.push({ mode: '', duration: '', distance: '' }); renderTables(); refresh(); });
     $('mapUpload').addEventListener('change', async (e) => {

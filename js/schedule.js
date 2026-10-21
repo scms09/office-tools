@@ -10,6 +10,7 @@
 (function () {
   const KEY = 'trip.draft.v1';
   const API_KEY = 'gmaps.apiKey';
+  const NAVITIME_KEY = 'navitime.rapidKey'; // both keys are also read by js/transit.js
   const C = { grid: 'BFBFBF', meeting: 'E7E8EA', travel: 'FFF2CC', line: '000000', arrow: '9BBB59', text: '000000' };
   const FIRST_HOUR = 6, LAST_HOUR = 24;
   const DAY_START = FIRST_HOUR * 60, DAY_END = LAST_HOUR * 60;
@@ -384,92 +385,9 @@
     s.textContent = msg;
     s.classList.toggle('error', !!isError);
   }
-  const secs = (d) => parseInt(String(d || '0').replace('s', ''), 10) || 0;
-  function fmtDur(s) {
-    const m = Math.round(s / 60);
-    return m < 60 ? `${m} min` : `${Math.floor(m / 60)} h${m % 60 ? ' ' + (m % 60) + ' min' : ''}`;
-  }
-
-  function transitOption(route) {
-    const steps = (route.legs || []).flatMap((l) => l.steps || []);
-    const idx = steps.map((s, i) => (s.transitDetails ? i : -1)).filter((i) => i >= 0);
-    if (!idx.length) return null;
-    const first = steps[idx[0]].transitDetails, last = steps[idx[idx.length - 1]].transitDetails;
-    const walk = (list) => list.reduce((a, s) => a + secs(s.staticDuration), 0);
-    const dep = new Date(Date.parse(first.stopDetails.departureTime) - walk(steps.slice(0, idx[0])) * 1000);
-    const arr = new Date(Date.parse(last.stopDetails.arrivalTime) + walk(steps.slice(idx[idx.length - 1] + 1)) * 1000);
-    const summary = idx.map((i) => {
-      const t = steps[i].transitDetails, line = t.transitLine || {}, sd = t.stopDetails || {};
-      const name = line.nameShort || line.name || 'Train';
-      return `${name}: ${sd.departureStop && sd.departureStop.name} ${utcToZoned(new Date(sd.departureTime)).time} → ${sd.arrivalStop && sd.arrivalStop.name} ${utcToZoned(new Date(sd.arrivalTime)).time}`;
-    }).join('; ');
-    return { dep, arr, summary };
-  }
-
-  function driveOption(route, mode, when) {
-    const dur = secs(route.duration);
-    const dep = mode === 'arrive' ? new Date(when.getTime() - dur * 1000) : when;
-    return { dep, arr: new Date(dep.getTime() + dur * 1000), summary: `Drive about ${fmtDur(dur)}` };
-  }
-
-  async function computeRoutes(key, body, fieldMask) {
-    const res = await fetch('https://routes.googleapis.com/directions/v2:computeRoutes', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': key, 'X-Goog-FieldMask': fieldMask },
-      body: JSON.stringify(body),
-    });
-    const json = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error((json.error && json.error.message) || res.statusText);
-    return json;
-  }
-
-  // Coordinates of the two places as Google understands them, via a drive route
-  // (also tells us whether the places exist at all). Null if not found.
-  async function placeCoords(key, from, to) {
-    const json = await computeRoutes(key, { origin: { address: from }, destination: { address: to }, travelMode: 'DRIVE' }, 'routes.legs.startLocation,routes.legs.endLocation');
-    const leg = json.routes && json.routes[0] && json.routes[0].legs && json.routes[0].legs[0];
-    if (!leg) return null;
-    const ll = (l) => `${l.latLng.latitude},${l.latLng.longitude}`;
-    return { start: ll(leg.startLocation), goal: ll(leg.endLocation) };
-  }
-
-  // ---------- NAVITIME (Japan trains, via RapidAPI) ----------
-  const NAVITIME_KEY = 'navitime.rapidKey';
-  const NAVITIME_HOST = 'navitime-route-totalnavi.p.rapidapi.com';
-  let navitimeLeft = null;
-
-  async function navitimeOptions(coords, from, to, date, time, mode) {
-    const p = new URLSearchParams({ ...coords, [mode === 'arrive' ? 'goal_time' : 'start_time']: `${date}T${time}:00`, limit: '5' });
-    const res = await fetch(`https://${NAVITIME_HOST}/route_transit?${p}`, {
-      headers: { 'X-RapidAPI-Key': App.store.get(NAVITIME_KEY, ''), 'X-RapidAPI-Host': NAVITIME_HOST },
-    });
-    const json = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error('NAVITIME: ' + (json.message || res.statusText));
-    navitimeLeft = res.headers.get('x-ratelimit-requests-remaining');
-    return (json.items || []).map((item) => navitimeOption(item, from, to));
-  }
-
-  function navitimeOption(item, from, to) {
-    const sections = item.sections || [];
-    const place = (pt) => (!pt ? '' : pt.name === 'start' ? from : pt.name === 'goal' ? to : JpNames.toEnglish(pt.name));
-    const hm = (iso) => String(iso).slice(11, 16); // NAVITIME times are Japan local time
-    const rides = sections
-      .map((s, i) => ({ s, i }))
-      .filter(({ s }) => s.type === 'move' && s.move !== 'walk')
-      .map(({ s, i }) => `${JpNames.toEnglish((s.transport && s.transport.self_name) || s.line_name)}: ${place(sections[i - 1])} ${hm(s.from_time)} → ${place(sections[i + 1])} ${hm(s.to_time)}`);
-    const m = item.summary.move;
-    const fare = m.fare && m.fare.unit_0 ? ` · ¥${Math.round(m.fare.unit_0).toLocaleString()}` : '';
-    return { dep: new Date(m.from_time), arr: new Date(m.to_time), summary: rides.join('; ') + fare };
-  }
-
-  // Why a search came back empty, in plain words.
-  function noOptionsReason(type, json, coords) {
-    const lookUp = ' Use "Open in Google Maps" to look up the trains, then type the times in below.';
-    if (type !== 'train') return 'Google found no driving route between these places. Try adding the city or country.';
-    if ((json.routes || []).length) return 'Google only found a walking route — no train is needed for this trip.';
-    if (!coords) return 'Google could not find one of these places. Try adding the city or country, e.g. "Kawagoe Station, Saitama".' + lookUp;
-    return 'Google does not provide train timetables for this area through its API (Japan is not covered). '
-      + 'Add a NAVITIME key at the top of the page for Japanese trains, or' + lookUp.replace(' Use', ' use');
+  function driveOption(driveSecs, mode, when) {
+    const dep = mode === 'arrive' ? new Date(when.getTime() - driveSecs * 1000) : when;
+    return { dep, arr: new Date(dep.getTime() + driveSecs * 1000), summary: `Drive about ${Transit.fmtDur(driveSecs)}` };
   }
 
   function mapsDirectionsUrl() {
@@ -481,47 +399,38 @@
   }
 
   async function searchOptions() {
-    const key = App.store.get(API_KEY, '');
     const type = $('evType').value, from = $('evFrom').value.trim(), to = $('evTo').value.trim();
     const date = $('evDate').value, time = $('evSearchTime').value, mode = $('evSearchMode').value;
-    if (!key) { setSearchStatus('Add your Google Maps API key at the top of the page first.', true); return; }
+    if (!Transit.keys().google) { setSearchStatus('Add your Google Maps API key at the top of the page first.', true); return; }
     if (!from || !to || !date || !time) { setSearchStatus('Fill in From, To, Date and the time to search for.', true); return; }
 
-    const when = zonedToUtc(date, time);
-    const body = { origin: { address: from }, destination: { address: to }, travelMode: type === 'train' ? 'TRANSIT' : 'DRIVE', languageCode: 'en' };
-    if (type === 'train') {
-      body.computeAlternativeRoutes = true;
-      body[mode === 'arrive' ? 'arrivalTime' : 'departureTime'] = when.toISOString();
-    } else if (mode === 'leave' && when > new Date()) {
-      body.departureTime = when.toISOString();
-      body.routingPreference = 'TRAFFIC_AWARE';
-    }
     setSearchStatus('Searching…');
     $('evResults').innerHTML = '';
     try {
-      const json = await computeRoutes(key, body, 'routes.duration,routes.legs.steps.travelMode,routes.legs.steps.staticDuration,routes.legs.steps.transitDetails');
-      let options = (json.routes || []).map((r) => (type === 'train' ? transitOption(r) : driveOption(r, mode, when))).filter(Boolean);
-      let source = '';
-      // No trains from Google at all (e.g. Japan): fall back to NAVITIME when a key is set.
-      if (!options.length && type === 'train' && !(json.routes || []).length) {
-        const coords = await placeCoords(key, from, to).catch(() => null);
-        if (coords && App.store.get(NAVITIME_KEY, '')) {
-          setSearchStatus('Google has no trains here — asking NAVITIME…');
-          options = await navitimeOptions(coords, from, to, date, time, mode);
-          source = ' from NAVITIME' + (navitimeLeft != null ? ` (${navitimeLeft} searches left this month)` : '');
+      let options, source = '';
+      if (type === 'train') {
+        const res = await Transit.trainRoutes({ from, to, date, time, mode, tz: tz() }, setSearchStatus);
+        if (!res.routes.length) {
+          setSearchStatus(Transit.reasonText(res.reason) + (res.reason === 'walk' ? '' : ' Use "Open in Google Maps" to look up the trains, then type the times in below.'), true);
+          return;
         }
-        if (!options.length) { setSearchStatus(source ? 'NAVITIME found no trains for that time.' : noOptionsReason(type, json, coords), true); return; }
+        options = res.routes.map((r) => ({ dep: r.dep, arr: r.arr, summary: Transit.summary(r) }));
+        if (res.source === 'NAVITIME') source = ' from NAVITIME' + (res.left != null ? ` (${res.left} searches left this month)` : '');
+      } else {
+        const when = zonedToUtc(date, time);
+        const car = await Transit.drive(from, to, mode === 'leave' ? when : null);
+        if (!car) { setSearchStatus('Google found no driving route between these places. Try adding the city or country.', true); return; }
+        options = [driveOption(car.secs, mode, when)];
       }
-      if (!options.length) { setSearchStatus(noOptionsReason(type, json, true), true); return; }
       setSearchStatus(`${options.length} option${options.length > 1 ? 's' : ''}${source}. Using one adds ${state.buffer} min buffer (half before, half after) and rounds to 15 min.`);
       options.forEach((o) => {
         const d = utcToZoned(o.dep), a = utcToZoned(o.arr);
         $('evResults').appendChild(App.el('div', { class: 'result' },
-          App.el('div', {}, App.el('b', {}, `${d.time} → ${a.time}`), ` (${fmtDur((o.arr - o.dep) / 1000)})`, App.el('div', { class: 'muted' }, o.summary)),
+          App.el('div', {}, App.el('b', {}, `${d.time} → ${a.time}`), ` (${Transit.fmtDur((o.arr - o.dep) / 1000)})`, App.el('div', { class: 'muted' }, o.summary)),
           App.el('button', { type: 'button', class: 'btn small', onclick: () => applyOption(o) }, 'Use')));
       });
     } catch (err) {
-      setSearchStatus(err.message.startsWith('NAVITIME') ? err.message : 'Google Maps: ' + err.message, true);
+      setSearchStatus(err.message, true);
     }
   }
 

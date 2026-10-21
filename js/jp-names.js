@@ -46,13 +46,29 @@ const JpNames = (function () {
     '名古屋': 'Nagoya', '新横浜': 'Shin-Yokohama', '横浜': 'Yokohama', '川崎': 'Kawasaki', '蒲田': 'Kamata',
     '天空橋': 'Tenkubashi', '大井町': 'Oimachi', '天王洲アイル': 'Tennozu Isle', '大井競馬場前': 'Oi Keibajo-mae',
     '流通センター': 'Ryutsu Center', '昭和島': 'Showajima', '整備場': 'Seibijo', '新木場': 'Shin-Kiba', '大崎駅': 'Osaki Station',
-    'モノレール': 'Monorail', '駅': ' Station', '線': ' Line', '口': ' Exit',
+    // Keikyu airport line, Yamanote, Seibu Shinjuku and Tobu Tojo line stations
+    '泉岳寺': 'Sengakuji', '穴守稲荷': 'Anamori-inari', '大鳥居': 'Otorii', '糀谷': 'Kojiya', '京急蒲田': 'Keikyu Kamata',
+    '京急川崎': 'Keikyu Kawasaki', '北品川': 'Kita-Shinagawa', '高輪ゲートウェイ': 'Takanawa Gateway', '原宿': 'Harajuku',
+    '代々木': 'Yoyogi', '新大久保': 'Shin-Okubo', '高田馬場': 'Takadanobaba', '目白': 'Mejiro', '大塚': 'Otsuka', '巣鴨': 'Sugamo',
+    '駒込': 'Komagome', '田端': 'Tabata', '西日暮里': 'Nishi-Nippori', '鶯谷': 'Uguisudani', '御徒町': 'Okachimachi',
+    '西武新宿線': 'Seibu Shinjuku Line', '西武新宿': 'Seibu-Shinjuku', '下落合': 'Shimo-Ochiai', '中井': 'Nakai', '新井薬師前': 'Araiyakushi-mae', '沼袋': 'Numabukuro',
+    '野方': 'Nogata', '都立家政': 'Toritsu-Kasei', '鷺ノ宮': 'Saginomiya', '下井草': 'Shimo-Igusa', '井荻': 'Iogi',
+    '上井草': 'Kami-Igusa', '上石神井': 'Kami-Shakujii', '武蔵関': 'Musashi-Seki', '東伏見': 'Higashi-Fushimi',
+    '西武柳沢': 'Seibu-Yagisawa', '田無': 'Tanashi', '花小金井': 'Hana-Koganei', '小平': 'Kodaira', '久米川': 'Kumegawa',
+    '東村山': 'Higashi-Murayama', '航空公園': 'Kokukoen', '新所沢': 'Shin-Tokorozawa', '入曽': 'Iriso', '狭山市': 'Sayama-shi',
+    '新狭山': 'Shin-Sayama', '南大塚': 'Minami-Otsuka', '高田馬場駅': 'Takadanobaba Station', '北池袋': 'Kita-Ikebukuro',
+    '下板橋': 'Shimo-Itabashi', '大山': 'Oyama', '中板橋': 'Naka-Itabashi', 'ときわ台': 'Tokiwadai', '上板橋': 'Kami-Itabashi',
+    '東武練馬': 'Tobu-Nerima', '下赤塚': 'Shimo-Akatsuka', '成増': 'Narimasu', '朝霞': 'Asaka', '柳瀬川': 'Yanasegawa',
+    'みずほ台': 'Mizuhodai', '鶴瀬': 'Tsuruse', '上福岡': 'Kami-Fukuoka', '新河岸': 'Shingashi',
+    '的場': 'Matoba', '笠幡': 'Kasahata', '武蔵高萩': 'Musashi-Takahagi', '高麗川': 'Komagawa', '南古谷': 'Minami-Furuya',
+    'モノレール': 'Monorail', '駅': ' Station', '線': ' Line', '口': ' Exit', '市': '-shi',
   };
   const keys = Object.keys(WORDS).sort((a, b) => b.length - a.length);
 
   function toEnglish(text) {
     if (!text) return '';
-    let out = String(text).normalize('NFKC'); // full-width ＪＲ / １ -> JR / 1
+    let out = String(text).normalize('NFKC') // full-width ＪＲ / １ -> JR / 1
+      .replace(/\((東京都|埼玉県|千葉県|神奈川県|栃木県|群馬県|茨城県|静岡県|愛知県|大阪府|京都府)\)/g, ''); // drop "(Saitama Pref.)" style labels
     keys.forEach((k) => { out = out.split(k).join(WORDS[k]); });
     return out.replace(/(\S)\(/g, '$1 (').replace(/\s+/g, ' ').replace(/\s+\)/g, ')').trim();
   }
