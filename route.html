@@ -4,37 +4,44 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Route Planner · Office Automation</title>
-  <link rel="stylesheet" href="css/style.css?v=8">
+  <link rel="stylesheet" href="css/style.css?v=10">
 </head>
 <body>
   <header id="app-header"></header>
   <main class="tool">
     <section class="panel">
       <h1>Route Planner</h1>
-      <p class="lead">Enter two places and fetch the route from Google Maps, or type the journey legs yourself. Everything below stays editable.</p>
+      <p class="lead">Compares going by train all the way, by train part of the way and then a car, and by car all the way, and recommends one.</p>
 
       <div class="grid">
         <label class="field full">From
-          <input type="text" id="origin" placeholder="e.g. London Paddington Station">
+          <input type="text" id="origin" placeholder="e.g. Haneda Airport">
         </label>
         <label class="field full">To
-          <input type="text" id="destination" placeholder="e.g. Canary Wharf, London">
+          <input type="text" id="destination" placeholder="e.g. Kashiwabara, Sayama, Saitama">
         </label>
-        <label class="field">Main mode
-          <select id="mode">
-            <option value="TRANSIT">Public transport</option>
-            <option value="DRIVE">Car</option>
-            <option value="WALK">Walking</option>
-            <option value="BICYCLE">Bicycle</option>
-            <option value="TWO_WHEELER">Motorbike / scooter</option>
-          </select>
+        <label class="field full">Preferred station (optional)
+          <input type="text" id="via" placeholder="e.g. Kawagoe Station — trains will go through it, and the car can start there">
         </label>
-        <label class="field">Departure (optional)
-          <input type="datetime-local" id="departure">
+        <label class="field">Date
+          <input type="date" id="date">
         </label>
-        <div class="field full">Also compare
-          <div class="checks" id="compare"></div>
+        <div class="field">Time
+          <div class="search-row">
+            <select id="timeMode">
+              <option value="leave">Leave at</option>
+              <option value="arrive">Arrive by</option>
+            </select>
+            <input type="time" id="time">
+          </div>
         </div>
+        <label class="field">Time zone
+          <input type="text" id="tz" list="tzList" placeholder="e.g. Asia/Tokyo">
+          <datalist id="tzList"></datalist>
+        </label>
+        <label class="field">Time to get a car at the station (min)
+          <input type="number" id="pickup" min="0" step="5">
+        </label>
         <label class="field">Units
           <select id="units">
             <option value="METRIC">Kilometres</option>
@@ -44,16 +51,13 @@
       </div>
 
       <div class="actions">
-        <button class="btn primary" id="fetch">Get route from Google Maps</button>
+        <button class="btn primary" id="compare">Compare routes</button>
         <a class="btn" id="gmapsLink" target="_blank" rel="noopener">Open in Google Maps ↗</a>
       </div>
       <div class="status" id="status"></div>
+      <p class="hint" id="keyNote" hidden>Searching uses the API keys saved on the <a href="schedule.html">Trip Schedule</a> page (open “API keys” there).</p>
 
-      <details class="settings" id="keyBox">
-        <summary>Google Maps API key</summary>
-        <p>Needed only for “Get route”. The key needs <b>Routes API</b> and <b>Maps Static API</b> enabled. It is stored only in this browser.</p>
-        <input type="password" id="apiKey" placeholder="AIza…">
-      </details>
+      <div id="options" class="options"></div>
 
       <h3>Slide text</h3>
       <div class="grid">
@@ -61,7 +65,7 @@
           <input type="text" id="title" placeholder="Defaults to From → To">
         </label>
         <label class="field full">Subtitle
-          <input type="text" id="subtitle" placeholder="e.g. By public transport · 42 min · 12.4 km">
+          <input type="text" id="subtitle" placeholder="Filled in when you pick an option">
         </label>
       </div>
 
@@ -81,10 +85,10 @@
       </div>
       <div class="actions"><button class="btn small" id="addLeg">+ Add leg</button></div>
 
-      <h3>Mode comparison</h3>
+      <h3>Options compared</h3>
       <div class="table-scroll">
         <table class="edit-table">
-          <thead><tr><th>Mode</th><th>Time</th><th>Distance</th><th></th></tr></thead>
+          <thead><tr><th>Option</th><th>Time</th><th>Notes</th><th></th></tr></thead>
           <tbody id="comparison"></tbody>
         </table>
       </div>
@@ -102,8 +106,10 @@
   </main>
 
   <script src="https://cdn.jsdelivr.net/npm/pptxgenjs@3.12.0/dist/pptxgen.bundle.js"></script>
-  <script src="js/common.js?v=8"></script>
-  <script src="js/slide-engine.js?v=8"></script>
-  <script src="js/route.js?v=8"></script>
+  <script src="js/common.js?v=10"></script>
+  <script src="js/slide-engine.js?v=10"></script>
+  <script src="js/jp-names.js?v=10"></script>
+  <script src="js/transit.js?v=10"></script>
+  <script src="js/route.js?v=10"></script>
 </body>
 </html>
