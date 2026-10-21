@@ -141,7 +141,9 @@
   function assignLanes(list) {
     list.forEach((x) => { x.ve = Math.max(x.ve ?? x.e, x.e); x.vs = Math.min(x.vs ?? x.s, x.s); });
     list.sort((a, b) => a.vs - b.vs || b.ve - a.ve);
-    let cluster = [], clusterEnd = -1;
+    let cluster = [];
+    // A travel icon may poke up beside another trip's arrow, but not into a meeting/note box.
+    const overlaps = (c, seg) => c.ve > (isTravel(c.ev) ? seg.s : seg.vs);
     const flush = () => {
       const n = Math.max(...cluster.map((x) => x.lane)) + 1;
       const isTravelLane = (l) => !cluster.some((x) => x.lane === l && !isTravel(x.ev));
@@ -152,12 +154,11 @@
       cluster = [];
     };
     list.forEach((seg) => {
-      if (cluster.length && seg.vs >= clusterEnd) { flush(); clusterEnd = -1; }
+      if (cluster.length && !cluster.some((c) => overlaps(c, seg))) flush();
       let lane = 0;
-      while (cluster.some((c) => c.lane === lane && c.ve > seg.vs)) lane++;
+      while (cluster.some((c) => c.lane === lane && overlaps(c, seg))) lane++;
       seg.lane = lane;
       cluster.push(seg);
-      clusterEnd = Math.max(clusterEnd, seg.ve);
     });
     if (cluster.length) flush();
   }
