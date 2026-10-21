@@ -66,7 +66,11 @@
     });
     const json = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error((json.error && json.error.message) || res.statusText);
-    if (!json.routes || !json.routes.length) throw new Error(`No ${TRAVEL_MODES[travelMode].toLowerCase()} route found`);
+    if (!json.routes || !json.routes.length) {
+      throw new Error(travelMode === 'TRANSIT'
+        ? 'No public transport route found. Google does not provide train timetables for some countries (e.g. Japan) through its API — use "Open in Google Maps" and type the legs in.'
+        : `No ${TRAVEL_MODES[travelMode].toLowerCase()} route found`);
+    }
     return json.routes[0];
   }
 

@@ -411,6 +411,38 @@
     return { dep, arr: new Date(dep.getTime() + dur * 1000), summary: `Drive about ${fmtDur(dur)}` };
   }
 
+  async function computeRoutes(key, body, fieldMask) {
+    const res = await fetch('https://routes.googleapis.com/directions/v2:computeRoutes', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': key, 'X-Goog-FieldMask': fieldMask },
+      body: JSON.stringify(body),
+    });
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error((json.error && json.error.message) || res.statusText);
+    return json;
+  }
+
+  // Google returns nothing at all for trains in some countries (e.g. Japan), so
+  // when a train search is empty, check whether the places themselves are found.
+  async function noOptionsReason(key, type, from, to, json) {
+    const lookUp = ' Use "Open in Google Maps" to look up the trains, then type the times in below.';
+    if (type !== 'train') return 'Google found no driving route between these places. Try adding the city or country.';
+    if ((json.routes || []).length) return 'Google only found a walking route — no train is needed for this trip.';
+    let placesFound = false;
+    try { placesFound = !!((await computeRoutes(key, { origin: { address: from }, destination: { address: to }, travelMode: 'DRIVE' }, 'routes.duration')).routes || []).length; } catch { /* ignore */ }
+    return placesFound
+      ? 'Google does not provide train timetables for this area through its API (Japan is not covered).' + lookUp
+      : 'Google could not find one of these places. Try adding the city or country, e.g. "Kawagoe Station, Saitama".' + lookUp;
+  }
+
+  function mapsDirectionsUrl() {
+    const p = new URLSearchParams({
+      api: '1', origin: $('evFrom').value.trim(), destination: $('evTo').value.trim(),
+      travelmode: $('evType').value === 'train' ? 'transit' : 'driving',
+    });
+    return 'https://www.google.com/maps/dir/?' + p.toString();
+  }
+
   async function searchOptions() {
     const key = App.store.get(API_KEY, '');
     const type = $('evType').value, from = $('evFrom').value.trim(), to = $('evTo').value.trim();
@@ -430,18 +462,9 @@
     setSearchStatus('Searching…');
     $('evResults').innerHTML = '';
     try {
-      const res = await fetch('https://routes.googleapis.com/directions/v2:computeRoutes', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json', 'X-Goog-Api-Key': key,
-          'X-Goog-FieldMask': 'routes.duration,routes.legs.steps.travelMode,routes.legs.steps.staticDuration,routes.legs.steps.transitDetails',
-        },
-        body: JSON.stringify(body),
-      });
-      const json = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error((json.error && json.error.message) || res.statusText);
+      const json = await computeRoutes(key, body, 'routes.duration,routes.legs.steps.travelMode,routes.legs.steps.staticDuration,routes.legs.steps.transitDetails');
       const options = (json.routes || []).map((r) => (type === 'train' ? transitOption(r) : driveOption(r, mode, when))).filter(Boolean);
-      if (!options.length) { setSearchStatus('No options found for that time.', true); return; }
+      if (!options.length) { setSearchStatus(await noOptionsReason(key, type, from, to, json), true); return; }
       setSearchStatus(`${options.length} option${options.length > 1 ? 's' : ''}. Using one adds ${state.buffer} min buffer (half before, half after) and rounds to 15 min.`);
       options.forEach((o) => {
         const d = utcToZoned(o.dep), a = utcToZoned(o.arr);
@@ -601,6 +624,10 @@
       refresh();
     });
     $('evSearch').addEventListener('click', searchOptions);
+    $('evMapsLink').addEventListener('click', (e) => {
+      if (!$('evFrom').value.trim() || !$('evTo').value.trim()) { e.preventDefault(); setSearchStatus('Fill in From and To first.', true); return; }
+      $('evMapsLink').href = mapsDirectionsUrl();
+    });
 
     $('dayForm').addEventListener('submit', () => {
       state.days[editingDay] = Object.fromEntries(Object.entries(DAY_FIELDS).map(([k, id]) => [k, $(id).value.trim()]));
