@@ -439,7 +439,8 @@
   async function searchOptions() {
     const type = $('evType').value, from = $('evFrom').value.trim(), to = $('evTo').value.trim();
     const date = $('evDate').value, time = $('evSearchTime').value, mode = $('evSearchMode').value;
-    if (!Transit.keys().google) { setSearchStatus('Add your Google Maps API key at the top of the page first.', true); return; }
+    const k = Transit.keys(); // trains in Japan need only Geoapify + NAVITIME
+    if (!k.google && (type !== 'train' || !(k.geoapify && k.navitime))) { setSearchStatus('Add your Google Maps API key at the top of the page first.', true); return; }
     if (!from || !to || !date || !time) { setSearchStatus('Fill in From, To, Date and the time to search for.', true); return; }
 
     setSearchStatus('Searching…');

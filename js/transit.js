@@ -57,18 +57,71 @@ const Transit = (function () {
   const waypoint = (p) => (typeof p === 'string' ? { address: p } : { location: { latLng: { latitude: p.lat, longitude: p.lng } } });
   const latLng = (l) => (l && l.latLng ? { lat: l.latLng.latitude, lng: l.latLng.longitude } : null);
 
-  // Drive between two places (address strings or { lat, lng }). Also tells us where
-  // Google placed the two ends. Null when Google finds no road route.
+  // ---------- Saved results (places and typical drive times rarely change) ----------
+  // Kept in this browser so repeating or tweaking a search costs no requests.
+  const CACHE_KEY = 'transit.cache.v1';
+  const DAY_MS = 24 * 3600e3;
+  const cache = App.store.get(CACHE_KEY, {});
+  async function remembered(key, maxAgeMs, fetcher) {
+    const hit = cache[key];
+    if (hit && Date.now() - hit.t < maxAgeMs) return hit.v;
+    const v = await fetcher();
+    if (v != null) {
+      cache[key] = { t: Date.now(), v };
+      const keysByAge = Object.keys(cache).sort((a, b) => cache[a].t - cache[b].t);
+      keysByAge.slice(0, Math.max(0, keysByAge.length - 400)).forEach((k) => delete cache[k]);
+      App.store.set(CACHE_KEY, cache);
+    }
+    return v;
+  }
+  const placeKey = (p) => (typeof p === 'string' ? p.trim().toLowerCase() : `${p.lat.toFixed(4)},${p.lng.toFixed(4)}`);
+
+  // Drive between two places (address strings or { lat, lng }), traffic-aware from
+  // Google. Also tells us where Google placed the two ends. Null when there is no road route.
+  // Without a departure time the answer is a typical drive, so it is remembered for a week.
   async function drive(origin, destination, departAt) {
-    const body = { origin: waypoint(origin), destination: waypoint(destination), travelMode: 'DRIVE' };
-    if (departAt && departAt > new Date()) { body.departureTime = departAt.toISOString(); body.routingPreference = 'TRAFFIC_AWARE'; }
-    const json = await computeRoutes(body, 'routes.duration,routes.distanceMeters,routes.polyline.encodedPolyline,routes.legs.startLocation,routes.legs.endLocation');
-    const r = json.routes && json.routes[0];
-    if (!r) return null;
-    return {
-      secs: secs(r.duration), meters: r.distanceMeters || 0, polyline: r.polyline && r.polyline.encodedPolyline,
-      start: latLng(r.legs[0].startLocation), goal: latLng(r.legs[0].endLocation),
+    const fetcher = async () => {
+      const body = { origin: waypoint(origin), destination: waypoint(destination), travelMode: 'DRIVE' };
+      if (departAt && departAt > new Date()) { body.departureTime = departAt.toISOString(); body.routingPreference = 'TRAFFIC_AWARE'; }
+      const json = await computeRoutes(body, 'routes.duration,routes.distanceMeters,routes.polyline.encodedPolyline,routes.legs.startLocation,routes.legs.endLocation');
+      const r = json.routes && json.routes[0];
+      if (!r) return null;
+      return {
+        secs: secs(r.duration), meters: r.distanceMeters || 0, polyline: r.polyline && r.polyline.encodedPolyline,
+        start: latLng(r.legs[0].startLocation), goal: latLng(r.legs[0].endLocation),
+      };
     };
+    if (departAt) return fetcher();
+    return remembered(`drive:${placeKey(origin)}>${placeKey(destination)}`, 7 * DAY_MS, fetcher);
+  }
+
+  // ---------- Geoapify (free): places and quick drive estimates ----------
+  async function geoapify(path, options) {
+    const sep = path.includes('?') ? '&' : '?';
+    const res = await fetch(`https://api.geoapify.com${path}${sep}apiKey=${encodeURIComponent(keys().geoapify)}`, options);
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error('Geoapify: ' + (json.message || json.error || res.statusText));
+    return json;
+  }
+
+  // Place name -> { lat, lng, country } (country = 'jp' etc.), or null. Needs a Geoapify key.
+  async function geocode(text) {
+    if (!keys().geoapify || !text) return null;
+    return remembered(`place:${placeKey(text)}`, 90 * DAY_MS, async () => {
+      const json = await geoapify(`/v1/geocode/search?text=${encodeURIComponent(text)}&lang=en&limit=1&format=json`);
+      const r = json.results && json.results[0];
+      return r ? { lat: r.lat, lng: r.lon, country: r.country_code } : null;
+    });
+  }
+
+  // Drive estimates from many places to one, in a single request. These assume empty
+  // roads (about half of Google's times in Japan), so use them to rank, not to plan.
+  async function quickDriveTimes(origins, goal) {
+    const json = await geoapify('/v1/routematrix', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode: 'drive', sources: origins.map((o) => ({ location: [o.lng, o.lat] })), targets: [{ location: [goal.lng, goal.lat] }] }),
+    });
+    return (json.sources_to_targets || []).map((row) => (row && row[0] && row[0].time != null ? { secs: row[0].time, meters: row[0].distance } : null));
   }
 
   const VEHICLE = {
@@ -199,27 +252,49 @@ const Transit = (function () {
     return [{ ...first, arr: second.arr, legs: [...first.legs, ...second.legs], viaArr: first.arr }];
   }
 
-  // Returns { routes, source, left, car, reason }. reason explains an empty result:
-  // 'walk' | 'place' | 'no-data' | 'none'. car (when looked up) is the drive between the two places.
+  // Where the two places are: Geoapify (free) when there's a key, otherwise Google's
+  // drive route between them (which then also gives the car option). Null if not found.
+  async function places(from, to) {
+    const [start, goal] = await Promise.all([geocode(from), geocode(to)]).catch(() => [null, null]);
+    if (start && goal) return { start, goal };
+    if (!keys().google) return null;
+    const car = await drive(from, to).catch(() => null);
+    return car ? { start: car.start, goal: car.goal, car } : null;
+  }
+
+  // Returns { routes, source, left, places, reason }. reason explains an empty result:
+  // 'walk' | 'place' | 'no-data' | 'none'. places (when looked up) = { start, goal, car? }.
   // via (optional) = { name, coord }: a station the trains must pass through; routes then carry viaArr.
   async function trainRoutes({ from, to, date, time, mode, tz, via }, onStatus) {
-    if (!keys().google) throw new Error('Add your Google Maps API key on the Trip Schedule page (API keys) first.');
+    const k = keys();
+    const viaNavitime = async (pl) => {
+      if (onStatus) onStatus('Asking NAVITIME for trains…');
+      const nav = await navitimeRoutes(pl.start, pl.goal, date, time, mode, via);
+      return { routes: nav.routes, source: 'NAVITIME', left: nav.left, places: pl, reason: nav.routes.length ? '' : 'none' };
+    };
+
+    // Both places in Japan: Google has no trains there, so go straight to NAVITIME.
+    let pl = null;
+    if (k.geoapify && k.navitime) {
+      pl = await places(from, to);
+      if (pl && pl.start.country === 'jp' && pl.goal.country === 'jp') return viaNavitime(pl);
+    }
+    if (!k.google) throw new Error('Add your Google Maps API key on the Trip Schedule page (API keys) first.');
+
     const when = zonedToUtc(date, time, tz);
     const g = await googleTransit(from, to, mode, when, tz);
     if (g.routes.length) {
-      if (!via) return { routes: g.routes, source: 'Google' };
+      if (!via) return { routes: g.routes, source: 'Google', places: pl };
       const joined = await googleViaRoutes(from, to, via, mode, when, tz);
-      return { routes: joined, source: 'Google', reason: joined.length ? '' : 'none' };
+      return { routes: joined, source: 'Google', places: pl, reason: joined.length ? '' : 'none' };
     }
-    if (g.found) return { routes: [], reason: 'walk' };
+    if (g.found) return { routes: [], reason: 'walk', places: pl };
 
-    // No trains from Google at all (e.g. Japan): NAVITIME, using Google's idea of where the places are.
-    const car = await drive(from, to).catch(() => null);
-    if (!car) return { routes: [], reason: 'place' };
-    if (!keys().navitime) return { routes: [], reason: 'no-data', car };
-    if (onStatus) onStatus('Google has no trains here — asking NAVITIME…');
-    const nav = await navitimeRoutes(car.start, car.goal, date, time, mode, via);
-    return { routes: nav.routes, source: 'NAVITIME', left: nav.left, car, reason: nav.routes.length ? '' : 'none' };
+    // No trains from Google at all: NAVITIME if there's a key.
+    pl = pl || await places(from, to);
+    if (!pl) return { routes: [], reason: 'place' };
+    if (!k.navitime) return { routes: [], reason: 'no-data', places: pl };
+    return viaNavitime(pl);
   }
 
   const REASONS = {
@@ -246,5 +321,5 @@ const Transit = (function () {
     return 2 * R * Math.asin(Math.sqrt(h));
   }
 
-  return { keys, fmtDur, utcToZoned, zonedToUtc, drive, trainRoutes, reasonText, summary, km, browserTz };
+  return { keys, fmtDur, utcToZoned, zonedToUtc, drive, geocode, quickDriveTimes, trainRoutes, reasonText, summary, km, browserTz };
 })();

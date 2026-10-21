@@ -7,7 +7,15 @@
 (function () {
   const KEY = 'route.draft.v2';
   const MIN_SAVING_MIN = 15; // train + car must save this much over train only to be recommended
-  const MAX_CAR_STATIONS = 8; // stations checked for a car drive (one Google request each)
+  // Stations where the car could start: Geoapify ranks up to MAX_CANDIDATES in one
+  // request, then Google confirms the best CONFIRM_STATIONS with traffic-aware times.
+  // Without a Geoapify key, Google checks the NO_GEOAPIFY_STATIONS closest instead.
+  const MAX_CANDIDATES = 25;
+  const CONFIRM_STATIONS = 3;
+  const NO_GEOAPIFY_STATIONS = 5;
+  // Geoapify assumes empty roads; Google's real times were 1.6–2.4x longer in tests
+  // around Saitama. Doubling keeps far-away stations from being ranked too high.
+  const QUICK_DRIVE_FACTOR = 2;
 
   // Badge colour for each leg mode on the slide.
   const LEG_MODES = {
@@ -40,8 +48,7 @@
   // the last stretch: only those within about a third of the trip (5–25 km) of
   // the destination, otherwise "train one stop, then drive" is just driving.
   // With a preferred station, only stations reached after it count (the station
-  // itself always does). Ranked by a rough guess (straight line at ~35 km/h) so
-  // only the most promising ones cost a Google request.
+  // itself always does). Ordered by a rough guess (straight line at ~35 km/h).
   function carStations(routes, start, goal, viaCoord) {
     const radius = Math.max(5, Math.min(25, Transit.km(start, goal) / 3));
     const best = new Map();
@@ -57,12 +64,25 @@
         if (!prev || guess < prev.guess) best.set(s.name, { ...s, route, legIndex, guess });
       });
     }));
-    return [...best.values()].sort((a, b) => a.guess - b.guess).slice(0, MAX_CAR_STATIONS);
+    return [...best.values()].sort((a, b) => a.guess - b.guess).slice(0, MAX_CANDIDATES);
+  }
+
+  // Shortlist of stations worth a Google request: ranked by Geoapify's quick
+  // (empty-road) drive estimates when there's a key, else by the rough guess.
+  async function shortlist(stations, goal) {
+    if (!Transit.keys().geoapify) return stations.slice(0, NO_GEOAPIFY_STATIONS);
+    const quick = await Transit.quickDriveTimes(stations.map((s) => s.coord), goal).catch(() => null);
+    if (!quick) return stations.slice(0, NO_GEOAPIFY_STATIONS);
+    return stations
+      .map((s, i) => ({ s, est: quick[i] ? (s.arr - s.route.dep) + quick[i].secs * QUICK_DRIVE_FACTOR * 1000 : Infinity }))
+      .sort((a, b) => a.est - b.est)
+      .slice(0, CONFIRM_STATIONS)
+      .map((x) => x.s);
   }
 
   // The best "train to a station, then car" journey, or null.
   async function trainPlusCar(routes, start, goal, viaCoord) {
-    const stations = carStations(routes, start, goal, viaCoord);
+    const stations = await shortlist(carStations(routes, start, goal, viaCoord), goal);
     const drives = await Promise.allSettled(stations.map((s) => Transit.drive(s.coord, goal)));
     let best = null;
     stations.forEach((s, i) => {
@@ -117,16 +137,17 @@
     try {
       const search = { from: state.origin, to: state.destination, date: state.date, time: state.time, mode: state.timeMode, tz: state.tz };
       const res = await Transit.trainRoutes(search, setStatus);
-      const car = res.car || await Transit.drive(state.origin, state.destination);
-      if (!car) { setStatus('Google could not find one of these places. Try adding the city or country.', true); return; }
+      const pl = res.places;
+      const car = (pl && pl.car) || await Transit.drive(pl ? pl.start : state.origin, pl ? pl.goal : state.destination);
+      if (!car) { setStatus('Could not find a road route between these places. Try adding the city or country.', true); return; }
 
       // Preferred station: find where it is, then trains that pass through it.
       let viaRes = null, viaCoord = null;
       if (state.via) {
         setStatus(`Finding ${state.via}…`);
-        const viaPlace = await Transit.drive(state.via, car.goal);
-        if (!viaPlace) { setStatus(`Google could not find "${state.via}". Try adding the city, e.g. "Kawagoe Station, Saitama".`, true); return; }
-        viaCoord = viaPlace.start;
+        viaCoord = await Transit.geocode(state.via).catch(() => null);
+        if (!viaCoord) { const d = await Transit.drive(state.via, car.goal); viaCoord = d && d.start; }
+        if (!viaCoord) { setStatus(`Could not find "${state.via}". Try adding the city, e.g. "Kawagoe Station, Saitama".`, true); return; }
         setStatus(`Looking up trains via ${state.via}…`);
         viaRes = await Transit.trainRoutes({ ...search, via: { name: state.via, coord: viaCoord } }, setStatus);
       }
