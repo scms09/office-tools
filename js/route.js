@@ -229,16 +229,65 @@
     renderTables();
     refresh();
     try {
-      state.map = await loadImage(staticMapUrl(r));
+      state.map = await mapPicture(r);
       refresh();
       setStatus(`"${o.title}" is on the slide. Edit anything below before downloading.`);
-    } catch {
-      setStatus(`"${o.title}" is on the slide. The map picture could not be loaded (Maps Static API may need enabling) — you can upload a screenshot instead.`, true);
+    } catch (err) {
+      setStatus(`"${o.title}" is on the slide, but the map picture could not be made (${err.message}). ${Transit.keys().geoapify ? '' : 'Add a free Geoapify key on the Trip Schedule page (API keys), or '}upload a screenshot instead.`, true);
     }
   }
 
-  // Map picture: train lines in red, walks in grey, car in blue; A = start, B = end, C = where the car starts.
-  function staticMapUrl(route) {
+  // Map picture: Geoapify when a key is set (free), otherwise Google Maps Static.
+  // Train lines in red, walks in grey, car in blue; A = start, B = end, C = where the car starts.
+  async function mapPicture(route) {
+    if (!Transit.keys().geoapify) return loadImage(googleMapUrl(route));
+    const res = await fetch(`https://maps.geoapify.com/v1/staticmap?apiKey=${encodeURIComponent(Transit.keys().geoapify)}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(geoapifyRequest(route)),
+    });
+    if (!res.ok) {
+      const msg = await res.json().then((j) => j.message || j.error).catch(() => '');
+      throw new Error(`Geoapify: ${msg || res.status}`);
+    }
+    return loadImage(await res.blob());
+  }
+
+  function geoapifyRequest(route) {
+    const pt = (c) => ({ lat: c.lat, lon: c.lng });
+    const geometries = [], all = [];
+    route.legs.forEach((l) => {
+      const seq = [l.fromCoord, ...(l.kind === 'car' ? [] : l.stops.map((s) => s.coord)), l.toCoord].filter(Boolean);
+      all.push(...seq);
+      if (l.kind === 'car') {
+        geometries.push(l.polyline
+          ? { type: 'polyline5', value: l.polyline, linecolor: '#2E86DE', linewidth: 5 }
+          : { type: 'polyline', value: seq.map(pt), linecolor: '#2E86DE', linewidth: 5 });
+      } else if (seq.length > 1) {
+        geometries.push(l.kind === 'walk'
+          ? { type: 'polyline', value: seq.map(pt), linecolor: '#6B7280', linewidth: 3, linestyle: 'dashed' }
+          : { type: 'polyline', value: seq.map(pt), linecolor: '#C0392B', linewidth: 5 });
+      }
+    });
+    const marker = (c, text, color) => ({ ...pt(c), text, color, type: 'material', size: 'large' });
+    const first = route.legs[0].fromCoord, last = route.legs[route.legs.length - 1].toCoord;
+    const carLeg = route.legs.find((l) => l.kind === 'car');
+    const markers = [
+      first && marker(first, 'A', '#27AE60'),
+      last && marker(last, 'B', '#C0392B'),
+      carLeg && carLeg !== route.legs[0] && carLeg.fromCoord && marker(carLeg.fromCoord, 'C', '#2E86DE'),
+    ].filter(Boolean);
+    // View: the whole route plus a margin; extra at the top because marker pins
+    // are drawn above their point.
+    const lats = all.map((c) => c.lat), lngs = all.map((c) => c.lng);
+    const latSpan = Math.max(...lats) - Math.min(...lats), lngSpan = Math.max(...lngs) - Math.min(...lngs);
+    const padLat = latSpan * 0.12 + 0.005, padTop = padLat + latSpan * 0.1 + 0.005, padLng = lngSpan * 0.12 + 0.005;
+    return {
+      style: 'osm-bright', lang: 'en', width: 620, height: 580, scaleFactor: 2, format: 'png',
+      area: { type: 'rect', value: { lat1: Math.min(...lats) - padLat, lon1: Math.min(...lngs) - padLng, lat2: Math.max(...lats) + padTop, lon2: Math.max(...lngs) + padLng } },
+      markers, geometries,
+    };
+  }
+
+  function googleMapUrl(route) {
     const pt = (c) => `${c.lat.toFixed(5)},${c.lng.toFixed(5)}`;
     const q = ['size=620x560', 'scale=2', 'maptype=roadmap'];
     route.legs.forEach((l) => {

@@ -10,7 +10,8 @@
 (function () {
   const KEY = 'trip.draft.v1';
   const API_KEY = 'gmaps.apiKey';
-  const NAVITIME_KEY = 'navitime.rapidKey'; // both keys are also read by js/transit.js
+  const NAVITIME_KEY = 'navitime.rapidKey'; // the keys are also read by js/transit.js
+  const GEOAPIFY_KEY = 'geoapify.apiKey';
   const C = { grid: 'BFBFBF', meeting: 'E7E8EA', travel: 'FFF2CC', line: '000000', arrow: '9BBB59', text: '000000' };
   const FIRST_HOUR = 6, LAST_HOUR = 24;
   const DAY_START = FIRST_HOUR * 60, DAY_END = LAST_HOUR * 60;
@@ -587,6 +588,9 @@
     const navKey = $('navitimeKey');
     navKey.value = App.store.get(NAVITIME_KEY, '');
     navKey.addEventListener('input', () => App.store.set(NAVITIME_KEY, navKey.value.trim()));
+    const geoKey = $('geoapifyKey');
+    geoKey.value = App.store.get(GEOAPIFY_KEY, '');
+    geoKey.addEventListener('input', () => App.store.set(GEOAPIFY_KEY, geoKey.value.trim()));
 
     $('logoUpload').addEventListener('change', async (e) => {
       const f = e.target.files[0];

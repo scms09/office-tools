@@ -15,7 +15,8 @@ const Transit = (function () {
   const NAVITIME_HOST = 'navitime-route-totalnavi.p.rapidapi.com';
   const JAPAN_TZ = 'Asia/Tokyo';
 
-  const keys = () => ({ google: App.store.get(GOOGLE_KEY, ''), navitime: App.store.get(NAVITIME_KEY, '') });
+  const GEOAPIFY_KEY = 'geoapify.apiKey';
+  const keys = () => ({ google: App.store.get(GOOGLE_KEY, ''), navitime: App.store.get(NAVITIME_KEY, ''), geoapify: App.store.get(GEOAPIFY_KEY, '') });
   const secs = (d) => parseInt(String(d || '0').replace('s', ''), 10) || 0;
   function fmtDur(s) {
     const m = Math.round(s / 60);
