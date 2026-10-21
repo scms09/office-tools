@@ -104,6 +104,10 @@
       });
     });
     Object.values(segs).forEach(assignLanes);
+    // How far down each box may grow: until the next thing that day starts.
+    Object.values(segs).forEach((list) => list.forEach((seg) => {
+      seg.growLimit = list.reduce((lim, o) => (o !== seg && o.vs >= seg.e ? Math.min(lim, o.vs) : lim), DAY_END);
+    }));
     return segs;
   }
 
@@ -111,7 +115,9 @@
   // their duration (arrow + icon + label box), so overlap is judged on this.
   const inchToMin = (h) => (h / G.hourH) * 60;
   function visualEnd(ev, s, e, first) {
-    if (ev.type === 'meeting') return Math.max(e, s + inchToMin(0.44));
+    // A meeting only grows into free space (see growLimit), but even a short one
+    // needs a minimum box height for its text.
+    if (ev.type === 'meeting') return Math.max(e, s + inchToMin(MEETING_MIN_H + 0.04));
     if (ev.type === 'note') return s + inchToMin(ev.showTime ? 0.48 : 0.32);
     const arrow = Math.max(((e - s) / 60) * G.hourH, 0.3);
     if (!first) return s + inchToMin(arrow);
@@ -123,6 +129,29 @@
   }
   // Where a segment's drawing really starts: travel icons poke up above the start time.
   const visualStart = (ev, s, first) => (isTravel(ev) && first ? Math.max(DAY_START, s - inchToMin(ICON_H[ev.type] + 0.03)) : s);
+
+  // Meetings keep full-size text where they can: a short meeting's box may run up
+  // to MEETING_EXTRA_H hours past its end time (into free space) before its text is shrunk.
+  const MEETING_EXTRA_H = 1;
+  const MEETING_MIN_H = 0.3; // inches
+  // compact: for a tight box, no spacer lines and the subtitle shares a line with
+  // the time ("Meeting · 13:00 – 14:30") so the text can stay bigger.
+  function meetingParas(ev, compact) {
+    const paras = [{ text: ev.title || 'Meeting', bold: true, fontSize: 14, align: 'center' }];
+    const bullets = (ev.bullets || '').split('\n').map((t) => t.trim()).filter(Boolean);
+    if (compact) {
+      paras.push({ text: [ev.subtitle, timeRange(ev)].filter(Boolean).join(' · '), bold: true, fontSize: 12, align: 'center' });
+      bullets.forEach((t) => paras.push({ text: t, fontSize: 11, bullet: true, align: 'left' }));
+      return paras;
+    }
+    if (ev.subtitle) paras.push({ text: ev.subtitle, fontSize: 12, align: 'center' });
+    // The gap before the bullets and the gap before the time are the same height.
+    const gap = () => ({ text: ' ', fontSize: 6 });
+    if (ev.subtitle && bullets.length) paras.push(gap());
+    bullets.forEach((t) => paras.push({ text: t, fontSize: 11, bullet: true, align: 'left' }));
+    paras.push(gap(), { text: timeRange(ev), bold: true, fontSize: 12, align: 'center' });
+    return paras;
+  }
 
   const ICON_H = { flight: 0.15, car: 0.17, train: 0.28 };
   const TRAVEL_LANE_W = 0.6;
@@ -164,13 +193,20 @@
     if (cluster.length) flush();
   }
 
-  // Rough estimate of wrapped text height (inches) in a box of width w.
+  // Estimate of wrapped text height (inches) in a box of width w: wraps word by
+  // word with Calibri's average character width.
   function parasHeight(paras, w, k = 1) {
     const usableW = Math.max(0.2, w - 0.1) * 72;
     return paras.reduce((sum, p) => {
-      const fs = p.fontSize * k;
+      const fs = p.fontSize * k, cw = fs * (p.bold ? 0.5 : 0.46);
       const avail = usableW - (p.bullet ? fs * 1.2 : 0);
-      const lines = Math.max(1, Math.ceil((p.text.length * fs * (p.bold ? 0.53 : 0.49)) / avail));
+      let lines = 1, used = 0;
+      p.text.split(/\s+/).filter(Boolean).forEach((word) => {
+        const ww = word.length * cw;
+        if (used && used + cw + ww > avail) { lines++; used = 0; }
+        used += (used ? cw : 0) + ww;
+        while (used > avail) { lines++; used -= avail; } // a word longer than the line
+      });
       return sum + (lines * fs * 1.2) / 72;
     }, 0) + 0.08;
   }
@@ -188,16 +224,17 @@
     const y1 = yOf(seg.s), y2 = yOf(seg.e);
 
     if (ev.type === 'meeting') {
-      const b = { x: lx + 0.05, y: y1 + 0.02, w: lw - 0.1, h: Math.max(y2 - y1 - 0.04, 0.4) };
-      let paras = [{ text: ev.title || 'Meeting', bold: true, fontSize: 14, align: 'center' }];
-      const bullets = (ev.bullets || '').split('\n').map((t) => t.trim()).filter(Boolean);
-      if (ev.subtitle) paras.push({ text: ev.subtitle, fontSize: 12, align: 'center' });
-      // The gap before the bullets and the gap before the time are the same height.
-      const gap = () => ({ text: ' ', fontSize: 6 });
-      if (ev.subtitle && bullets.length) paras.push(gap());
-      bullets.forEach((t) => paras.push({ text: t, fontSize: 11, bullet: true, align: 'left' }));
-      paras.push(gap(), { text: timeRange(ev), bold: true, fontSize: 12, align: 'center' });
-      paras = fitParas(paras, b.w, b.h);
+      const b = { x: lx + 0.05, y: y1 + 0.02, w: lw - 0.1, h: 0 };
+      let paras = meetingParas(ev);
+      // Full-size text where possible: the box may grow into free space below it, at
+      // most 1 hour past the end time; beyond that it switches to the compact layout
+      // and the text shrinks evenly to fit.
+      const span = Math.max(y2 - y1 - 0.04, MEETING_MIN_H);
+      const limit = Math.min(seg.e + MEETING_EXTRA_H * 60, seg.growLimit);
+      const maxH = Math.max(span, Math.min(yOf(limit) - y1 - 0.04, GRID_BOTTOM - 0.02 - b.y));
+      const full = parasHeight(paras, b.w);
+      b.h = Math.min(Math.max(span, full), maxH);
+      if (full > b.h) paras = fitParas(meetingParas(ev, true), b.w, b.h);
       els.push({ type: 'rect', ...b, fill: C.meeting, line: C.line, lineWidth: 2, radius: 0.1 });
       els.push({ type: 'text', ...b, paras, valign: 'middle', margin: 3, color: C.text });
       boxes.push({ ...b, id: ev.id });
