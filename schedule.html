@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Trip Schedule · Office Automation</title>
-  <link rel="stylesheet" href="css/style.css?v=6">
+  <link rel="stylesheet" href="css/style.css?v=7">
 </head>
 <body>
   <header id="app-header"></header>
@@ -45,9 +45,12 @@
         <button class="btn small" id="addEvent">+ Add event</button>
       </div>
       <details class="settings" id="keyBox">
-        <summary>Google Maps API key (for finding trains and drive times)</summary>
-        <p>The key needs <b>Routes API</b> enabled. It is stored only in this browser and shared with the Route Planner.</p>
+        <summary>API keys (for finding trains and drive times)</summary>
+        <p><b>Google Maps</b> — needs <b>Routes API</b> enabled. Used for drive times, trains outside Japan and finding places. Shared with the Route Planner.</p>
         <input type="password" id="apiKey" placeholder="AIza…">
+        <p><b>NAVITIME</b> (optional, for trains in Japan) — your <b>X-RapidAPI-Key</b> from the NAVITIME Route (totalnavi) page on RapidAPI. Only used when Google has no trains.</p>
+        <input type="password" id="navitimeKey" placeholder="RapidAPI key">
+        <p>Keys are stored only in this browser.</p>
       </details>
     </section>
 
@@ -177,9 +180,10 @@
   </dialog>
 
   <script src="https://cdn.jsdelivr.net/npm/pptxgenjs@3.12.0/dist/pptxgen.bundle.js"></script>
-  <script src="js/common.js?v=6"></script>
-  <script src="js/slide-engine.js?v=6"></script>
-  <script src="js/icons.js?v=6"></script>
-  <script src="js/schedule.js?v=6"></script>
+  <script src="js/common.js?v=7"></script>
+  <script src="js/slide-engine.js?v=7"></script>
+  <script src="js/icons.js?v=7"></script>
+  <script src="js/jp-names.js?v=7"></script>
+  <script src="js/schedule.js?v=7"></script>
 </body>
 </html>
