@@ -33,7 +33,9 @@ const JpNames = (function () {
     '通勤急行': ' Commuter Express', '特急': ' Limited Express', '急行': ' Express', '快速': ' Rapid', '準急': ' Semi-Express',
     '各駅停車': ' Local', '普通': ' Local', '徒歩': 'Walk', '・': ' / ',
     // Stations and places
+    '羽田空港第1・第2ターミナル': 'Haneda Airport T1/T2', '第1・第2ターミナル': ' T1/T2', '第3ターミナル': ' T3',
     '羽田空港第1ターミナル': 'Haneda Airport T1', '羽田空港第2ターミナル': 'Haneda Airport T2', '羽田空港第3ターミナル': 'Haneda Airport T3',
+    'エアポート快特': ' Airport Limited Express', 'エアポート急行': ' Airport Express', '快特': ' Limited Express', 'ターミナル': ' Terminal',
     '羽田空港': 'Haneda Airport', '成田空港': 'Narita Airport', '空港第2ビル': 'Narita Airport T2',
     '浜松町': 'Hamamatsucho', '東京': 'Tokyo', '品川': 'Shinagawa', '新橋': 'Shimbashi', '有楽町': 'Yurakucho',
     '秋葉原': 'Akihabara', '上野': 'Ueno', '日暮里': 'Nippori', '池袋': 'Ikebukuro', '新宿': 'Shinjuku', '渋谷': 'Shibuya',

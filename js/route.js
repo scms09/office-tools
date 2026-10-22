@@ -12,7 +12,8 @@
   // for the map. Without a Geoapify key, Google checks the NO_GEOAPIFY_STATIONS closest.
   const MAX_CANDIDATES = 25;
   const NO_GEOAPIFY_STATIONS = 5;
-  const MAX_CHANGE_WALK_MIN = 10; // longest acceptable walk between two trains
+  const MAX_CHANGE_WALK_MIN = 10; // longest acceptable walk between two trains (longer walks anywhere are flagged)
+  const MAX_STATION_WALK_MIN = 5; // a longer final walk means the train stopped short of the preferred station
 
   // Badge colour for each leg mode on the slide.
   const LEG_MODES = {
@@ -128,14 +129,25 @@
     }
     const res = await Transit.trainRoutes(s, setStatus);
     if (!res.routes.length) return { res, reason: res.reason };
-    const best = walkable(res.routes)
-      .map((r) => {
-        const car = carLeg(state.via, d.start || r.legs[r.legs.length - 1].toCoord, goal, new Date(r.arr.getTime() + state.pickup * 60000), d, state.pickup);
-        return { r, car, changes: Transit.changes(r.legs), time: car.arr - r.dep };
-      })
-      .sort(fewestChangesThenTime)[0];
-    const legs = best.r.legs.map((l) => (l.to ? l : { ...l, to: state.via })); // the walk into the station
-    return { res, route: { ...best.r, arr: best.car.arr, legs: [...legs, best.car] } };
+    const options = await Promise.all(walkable(res.routes).map(async (r) => {
+      const lastRide = r.legs.map((l) => l.kind).lastIndexOf('ride');
+      if (lastRide < 0) return null;
+      const ride = r.legs[lastRide];
+      const tailMin = r.legs.slice(lastRide + 1).reduce((m, l) => m + (l.arr - l.dep) / 60000, 0);
+      let legs = r.legs.map((l) => (l.to ? l : { ...l, to: ride.to })), from = { name: ride.to, coord: station, drive: d, ready: r.arr };
+      if (tailMin > MAX_STATION_WALK_MIN) {
+        // The train stops short of the station: the car starts where it stops instead of walking on.
+        const dd = await Transit.drive(ride.toCoord, goal).catch(() => null);
+        if (!dd) return null;
+        legs = r.legs.slice(0, lastRide + 1);
+        from = { name: ride.to, coord: ride.toCoord, drive: dd, ready: ride.arr };
+      }
+      const car = carLeg(from.name, from.coord, goal, new Date(from.ready.getTime() + state.pickup * 60000), from.drive, state.pickup);
+      return { r, legs, car, changes: Transit.changes(legs), time: car.arr - r.dep };
+    }));
+    const best = options.filter(Boolean).sort(fewestChangesThenTime)[0];
+    if (!best) return { res, reason: 'none' };
+    return { res, station: best.car.from, route: { ...best.r, arr: best.car.arr, fare: best.r.fare, legs: [...best.legs, best.car] } };
   }
 
   function carOnly(car, when) {
@@ -143,10 +155,13 @@
     return { source: 'drive', dep, arr: new Date(dep.getTime() + car.secs * 1000), fare: '', legs: [carLeg(state.origin, car.start, car.goal, dep, car)] };
   }
 
-  // Train + car is recommended only when it saves enough time over train only.
+  // Train + car is recommended when it saves enough time over train only, or when
+  // train only has a walk of over MAX_CHANGE_WALK_MIN (e.g. a long walk at the end).
   function pickRecommended(trainOpt, comboOpt) {
     if (trainOpt && comboOpt) comboOpt.saving = durMin(trainOpt.route) - durMin(comboOpt.route);
     if (comboOpt && comboOpt.saving >= MIN_SAVING_MIN) return comboOpt;
+    if (comboOpt && trainOpt && Transit.longWalks(trainOpt.route.legs, MAX_CHANGE_WALK_MIN).length
+      && !Transit.longWalks(comboOpt.route.legs, MAX_CHANGE_WALK_MIN).length) return comboOpt;
     return trainOpt || comboOpt || null;
   }
 
@@ -157,7 +172,10 @@
     box.innerHTML = '';
     if (!text) return null;
     if (!Transit.keys().geoapify) return text; // Google interprets the name itself
-    const matches = await Transit.placeMatches(text);
+    // The preferred station, and an airport given as From, are looked up as railway
+    // stations, so the train starts/ends on the platform rather than in a town or district centre.
+    const asStation = field === 'via' || (field === 'origin' && /airport|空港/i.test(text) && !/terminal|station|駅/i.test(text));
+    const matches = await Transit.placeMatches(text, asStation);
     if (!matches.length) throw new Error(`Could not find "${text}". Try adding the city, e.g. "Kawagoe Station, Saitama".`);
     const pick = state.picks[field] && state.picks[field].text === text ? state.picks[field].label : null;
     const chosen = matches.find((m) => m.label === pick) || matches[0];
@@ -205,7 +223,7 @@
         setStatus(`Looking up trains to ${state.via}…`);
         const p = await trainToStationThenCar(search, station, car.goal);
         prefRes = p.res;
-        if (p.route) pref = { id: 'pref', title: `Train to ${state.via} + car`, route: p.route };
+        if (p.route) pref = { id: 'pref', title: `Train to ${p.station || state.via} + car`, route: p.route };
       }
 
       const rec = pref || pickRecommended(trainOpt, comboOpt) || carOpt;
@@ -230,9 +248,15 @@
 
   // ---------- Option cards ----------
   function legLine(l) {
-    if (l.kind === 'walk') return `Walk ${Transit.fmtDur((l.arr - l.dep) / 1000)}`;
+    if (l.kind === 'walk') return `Walk ${Transit.fmtDur((l.arr - l.dep) / 1000)}${(l.arr - l.dep) / 60000 > MAX_CHANGE_WALK_MIN ? ' ⚠ long walk' : ''}`;
     if (l.kind === 'car') return `Car ${hm(l.dep)} → ${hm(l.arr)}: ${l.from} → ${l.to} (${fmtDist(l.meters)}${l.wait ? `, after ${l.wait} min to get a car` : ''})`;
     return `${l.line} ${hm(l.dep)} → ${hm(l.arr)}: ${l.from} → ${l.to}`;
+  }
+
+  function walkWarning(route) {
+    const long = Transit.longWalks(route.legs, MAX_CHANGE_WALK_MIN).map((l) => `${Math.round((l.arr - l.dep) / 60000)} min`);
+    if (!long.length) return '';
+    return `Includes a walk of ${long.join(' and ')}${route.longWalk ? ` — every train option found has a walk of over ${MAX_CHANGE_WALK_MIN} min at a change` : ''}.`;
   }
 
   function changesText(route) {
@@ -259,11 +283,11 @@
           App.el('button', { type: 'button', class: 'btn small' + (o.recommended ? ' primary' : ''), onclick: () => useOption(o) }, 'Use on slide')),
         App.el('div', { class: 'opt-time' }, `${hm(o.route.dep)} → ${hm(o.route.arr)} · ${Transit.fmtDur((o.route.arr - o.route.dep) / 1000)}`,
           changesText(o.route) ? ` · ${changesText(o.route)}` : '', optionNote(o) ? ` · ${optionNote(o)}` : ''),
-        o.route.longWalk ? App.el('div', { class: 'opt-warn' }, `Every train option found has a walk of more than ${MAX_CHANGE_WALK_MIN} min at a change.`) : '',
+        walkWarning(o.route) ? App.el('div', { class: 'opt-warn' }, walkWarning(o.route)) : '',
         App.el('ul', { class: 'opt-legs' }, o.route.legs.map((l) => App.el('li', {}, legLine(l))))));
     });
     if (options.some((o) => o.id === 'combo')) {
-      box.appendChild(App.el('p', { class: 'hint' }, `Train + car is recommended only when it saves at least ${MIN_SAVING_MIN} minutes. The ${state.pickup} min to get a car (taxi wait) is included.`));
+      box.appendChild(App.el('p', { class: 'hint' }, `Train routes: fewest changes first, walks at changes of at most ${MAX_CHANGE_WALK_MIN} min. Train + car is recommended when it saves at least ${MIN_SAVING_MIN} minutes or avoids a walk of over ${MAX_CHANGE_WALK_MIN} min. The ${state.pickup} min to get a car (taxi wait) is included.`));
     }
   }
 

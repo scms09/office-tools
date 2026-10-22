@@ -108,12 +108,19 @@ const Transit = (function () {
 
   // Place name -> up to 5 matches, best first: [{ lat, lng, country, label }]
   // (country = 'jp' etc.; label = full address). Needs a Geoapify key.
-  async function placeMatches(text) {
+  // asStation: look the name up as a railway station ("Kawagoe" -> "Kawagoe Station"),
+  // so a town name doesn't land in the town centre, far from its station.
+  async function placeMatches(text, asStation) {
     if (!keys().geoapify || !text) return [];
-    return (await remembered(`places:${placeKey(text)}`, 90 * DAY_MS, async () => {
-      const json = await geoapify(`/v1/geocode/search?text=${encodeURIComponent(text)}&lang=en&limit=5&format=json`);
-      return (json.results || []).map((r) => ({ lat: r.lat, lng: r.lon, country: r.country_code, label: r.formatted }));
+    const search = async (q) => (await remembered(`places:${placeKey(q)}`, 90 * DAY_MS, async () => {
+      const json = await geoapify(`/v1/geocode/search?text=${encodeURIComponent(q)}&lang=en&limit=5&format=json`);
+      return (json.results || []).map((r) => ({ lat: r.lat, lng: r.lon, country: r.country_code, label: r.formatted, type: r.result_type }));
     })) || [];
+    if (asStation && !/station|駅/i.test(text)) {
+      const stations = (await search(`${text} Station`)).filter((m) => m.type === 'amenity' || m.type === 'building');
+      if (stations.length) return stations;
+    }
+    return search(text);
   }
 
   // A place: either already located ({ lat, lng, ... }) or a name -> its best match, or null.
@@ -350,6 +357,9 @@ const Transit = (function () {
   function changes(legs, upTo = legs.length - 1) {
     return Math.max(0, legs.slice(0, upTo + 1).filter((l) => l.kind === 'ride').length - 1);
   }
+  // Walks longer than maxMin minutes anywhere in the legs (start, changes or end).
+  const longWalks = (legs, maxMin) => legs.filter((l) => l.kind === 'walk' && (l.arr - l.dep) / 60000 > maxMin);
+
   // Longest walk (minutes) between two rides, i.e. at a change. The walks at the very
   // start and end of the trip don't count.
   function longestChangeWalk(legs) {
@@ -368,5 +378,5 @@ const Transit = (function () {
     return 2 * R * Math.asin(Math.sqrt(h));
   }
 
-  return { keys, fmtDur, utcToZoned, zonedToUtc, drive, geocode, placeMatches, quickDriveTimes, trainRoutes, reasonText, summary, km, changes, longestChangeWalk, browserTz };
+  return { keys, fmtDur, utcToZoned, zonedToUtc, drive, geocode, placeMatches, quickDriveTimes, trainRoutes, reasonText, summary, km, changes, longestChangeWalk, longWalks, browserTz };
 })();
