@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Route Planner · Office Automation</title>
-  <link rel="stylesheet" href="css/style.css?v=18">
+  <link rel="stylesheet" href="css/style.css?v=19">
 </head>
 <body>
   <header id="app-header"></header>
@@ -14,15 +14,18 @@
       <p class="lead">Compares going by train all the way, by train part of the way and then a car, and by car all the way, and recommends one.</p>
 
       <div class="grid">
-        <label class="field full">From
-          <input type="text" id="origin" placeholder="e.g. Haneda Airport">
-        </label>
-        <label class="field full">To
+        <div class="field full"><label for="origin">From</label>
+          <input type="text" id="origin" placeholder="e.g. Haneda Airport Terminal 3 (name the terminal for airports)">
+          <div class="found" id="originFound"></div>
+        </div>
+        <div class="field full"><label for="destination">To</label>
           <input type="text" id="destination" placeholder="e.g. Kashiwabara, Sayama, Saitama">
-        </label>
-        <label class="field full">Preferred station (optional)
-          <input type="text" id="via" placeholder="e.g. Kawagoe Station — trains will go through it, and the car can start there">
-        </label>
+          <div class="found" id="destinationFound"></div>
+        </div>
+        <div class="field full"><label for="via">Preferred station (optional) — the train ends here (e.g. the hotel), then a car to the destination</label>
+          <input type="text" id="via" placeholder="e.g. Kawagoe Station">
+          <div class="found" id="viaFound"></div>
+        </div>
         <label class="field">Date
           <input type="date" id="date">
         </label>
@@ -106,10 +109,10 @@
   </main>
 
   <script src="https://cdn.jsdelivr.net/npm/pptxgenjs@3.12.0/dist/pptxgen.bundle.js"></script>
-  <script src="js/common.js?v=18"></script>
-  <script src="js/slide-engine.js?v=18"></script>
-  <script src="js/jp-names.js?v=18"></script>
-  <script src="js/transit.js?v=18"></script>
-  <script src="js/route.js?v=18"></script>
+  <script src="js/common.js?v=19"></script>
+  <script src="js/slide-engine.js?v=19"></script>
+  <script src="js/jp-names.js?v=19"></script>
+  <script src="js/transit.js?v=19"></script>
+  <script src="js/route.js?v=19"></script>
 </body>
 </html>
