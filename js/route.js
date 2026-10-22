@@ -23,6 +23,7 @@
     origin: '', destination: '', via: '', date: '', time: '09:00', timeMode: 'leave',
     tz: App.store.get('trip.draft.v1', {}).tz || Transit.browserTz, pickup: 10, units: 'METRIC',
     title: '', subtitle: '', map: null, legs: [], comparison: [],
+    picks: {}, // place chosen from the "Found:" dropdown, per field
   });
   const state = { ...defaults(), ...App.store.get(KEY, {}) };
   let options = []; // last comparison (not saved)
@@ -43,18 +44,14 @@
   // Stations along the train routes where you could get off and take a car for
   // the last stretch: only those within about a third of the trip (5–25 km) of
   // the destination, otherwise "train one stop, then drive" is just driving.
-  // With a preferred station, only stations reached after it count (the station
-  // itself always does). Ordered by a rough guess (straight line at ~35 km/h).
-  function carStations(routes, start, goal, viaCoord) {
+  // Ordered by a rough guess (straight line at ~35 km/h).
+  function carStations(routes, start, goal) {
     const radius = Math.max(5, Math.min(25, Transit.km(start, goal) / 3));
     const best = new Map();
     routes.forEach((route) => route.legs.forEach((leg, legIndex) => {
       if (leg.kind !== 'ride') return;
       [...leg.stops, { name: leg.to, coord: leg.toCoord, arr: leg.arr }].forEach((s) => {
-        if (!s.name || !s.coord) return;
-        const isVia = viaCoord && Transit.km(s.coord, viaCoord) < 1;
-        if (!isVia && Transit.km(s.coord, goal) > radius) return;
-        if (route.viaArr && s.arr < route.viaArr - 60000) return; // before the preferred station
+        if (!s.name || !s.coord || Transit.km(s.coord, goal) > radius) return;
         const guess = (s.arr - route.dep) + (Transit.km(s.coord, goal) / 35) * 3600e3;
         const prev = best.get(s.name);
         if (!prev || guess < prev.guess) best.set(s.name, { ...s, route, legIndex, guess });
@@ -73,41 +70,57 @@
     return rated.length && rated[0].est < Infinity ? [rated[0].s] : [];
   }
 
+  // A car leg to the destination, leaving at dep; d = drive look-up result.
+  const carLeg = (from, fromCoord, goal, dep, d, wait) => ({
+    kind: 'car', mode: 'Car', line: '', from, to: state.destination, fromCoord, toCoord: goal,
+    dep, arr: new Date(dep.getTime() + d.secs * 1000), meters: d.meters, polyline: d.polyline, path: d.path, wait,
+  });
+
   // The best "train to a station, then car" journey, or null.
-  async function trainPlusCar(routes, start, goal, viaCoord) {
-    const stations = await shortlist(carStations(routes, start, goal, viaCoord), goal);
+  async function trainPlusCar(routes, start, goal) {
+    const stations = await shortlist(carStations(routes, start, goal), goal);
     const drives = await Promise.allSettled(stations.map((s) => Transit.drive(s.coord, goal)));
     let best = null;
     stations.forEach((s, i) => {
       const d = drives[i].status === 'fulfilled' && drives[i].value;
       if (!d) return;
-      const carDep = new Date(s.arr.getTime() + state.pickup * 60000);
-      const arr = new Date(carDep.getTime() + d.secs * 1000);
-      if (!best || arr - s.route.dep < best.arr - best.s.route.dep) best = { s, d, carDep, arr };
+      const car = carLeg(s.name, s.coord, goal, new Date(s.arr.getTime() + state.pickup * 60000), d, state.pickup);
+      if (!best || car.arr - s.route.dep < best.car.arr - best.s.route.dep) best = { s, car };
     });
     if (!best) return null;
-    const { s, d } = best;
+    const { s, car } = best;
     const ride = s.route.legs[s.legIndex];
     const legs = [
       ...s.route.legs.slice(0, s.legIndex),
       { ...ride, to: s.name, toCoord: s.coord, arr: s.arr, meters: ride.to === s.name ? ride.meters : 0, stops: ride.stops.filter((x) => x.arr < s.arr) },
-      { kind: 'car', mode: 'Car', line: '', from: s.name, to: state.destination, fromCoord: s.coord, toCoord: goal, dep: best.carDep, arr: best.arr, meters: d.meters, polyline: d.polyline, path: d.path, wait: state.pickup },
+      car,
     ];
-    return { ...s.route, legs, arr: best.arr, fare: '', via: s.name };
+    return { ...s.route, legs, arr: car.arr, fare: '', via: s.name };
+  }
+
+  // Preferred station = where the train part ends (e.g. the hotel is there); the rest
+  // is by car. In "arrive by" mode the train must arrive early enough for the drive.
+  async function trainToStationThenCar(search, station, goal) {
+    const d = await Transit.drive(station, goal);
+    if (!d) return { reason: 'no-road' };
+    let s = { ...search, to: station };
+    if (search.mode === 'arrive') {
+      const by = new Date(Transit.zonedToUtc(search.date, search.time, search.tz) - (state.pickup * 60 + d.secs) * 1000);
+      const z = Transit.utcToZoned(by, search.tz);
+      s = { ...s, date: z.date, time: z.time };
+    }
+    const res = await Transit.trainRoutes(s, setStatus);
+    if (!res.routes.length) return { res, reason: res.reason };
+    const best = res.routes
+      .map((r) => ({ r, car: carLeg(state.via, d.start || r.legs[r.legs.length - 1].toCoord, goal, new Date(r.arr.getTime() + state.pickup * 60000), d, state.pickup) }))
+      .reduce((a, b) => (b.car.arr - b.r.dep < a.car.arr - a.r.dep ? b : a));
+    const legs = best.r.legs.map((l) => (l.to ? l : { ...l, to: state.via })); // the walk into the station
+    return { res, route: { ...best.r, arr: best.car.arr, legs: [...legs, best.car] } };
   }
 
   function carOnly(car, when) {
     const dep = state.timeMode === 'arrive' ? new Date(when.getTime() - car.secs * 1000) : when;
-    const arr = new Date(dep.getTime() + car.secs * 1000);
-    return { source: 'Google', dep, arr, fare: '', legs: [{ kind: 'car', mode: 'Car', line: '', from: state.origin, to: state.destination, fromCoord: car.start, toCoord: car.goal, dep, arr, meters: car.meters, polyline: car.polyline, path: car.path }] };
-  }
-
-  // Train all the way + the best train-and-car journey for a set of train routes.
-  async function trainOptions(routes, car, viaCoord) {
-    if (!routes.length) return {};
-    const train = routes.reduce((a, b) => ((b.arr - b.dep) < (a.arr - a.dep) ? b : a));
-    const combo = await trainPlusCar(routes, car.start, car.goal, viaCoord);
-    return { train, combo };
+    return { source: 'drive', dep, arr: new Date(dep.getTime() + car.secs * 1000), fare: '', legs: [carLeg(state.origin, car.start, car.goal, dep, car)] };
   }
 
   // Train + car is recommended only when it saves enough time over train only.
@@ -115,6 +128,29 @@
     if (trainOpt && comboOpt) comboOpt.saving = durMin(trainOpt.route) - durMin(comboOpt.route);
     if (comboOpt && comboOpt.saving >= MIN_SAVING_MIN) return comboOpt;
     return trainOpt || comboOpt || null;
+  }
+
+  // Finds a typed place and shows which one was found under its box. When the
+  // name matches several places, a dropdown lets you pick; the pick is remembered.
+  async function resolvePlace(field) {
+    const text = state[field], box = $(field + 'Found');
+    box.innerHTML = '';
+    if (!text) return null;
+    if (!Transit.keys().geoapify) return text; // Google interprets the name itself
+    const matches = await Transit.placeMatches(text);
+    if (!matches.length) throw new Error(`Could not find "${text}". Try adding the city, e.g. "Kawagoe Station, Saitama".`);
+    const pick = state.picks[field] && state.picks[field].text === text ? state.picks[field].label : null;
+    const chosen = matches.find((m) => m.label === pick) || matches[0];
+    if (matches.length > 1) {
+      const sel = App.el('select', { class: 'found-select', title: 'Not the right place? Pick another' },
+        matches.map((m, i) => App.el('option', { value: i }, m.label)));
+      sel.value = String(matches.indexOf(chosen));
+      sel.addEventListener('change', () => { state.picks[field] = { text, label: matches[sel.value].label }; compareRoutes(); });
+      box.append('📍 Found: ', sel);
+    } else {
+      box.append(`📍 Found: ${chosen.label}`);
+    }
+    return { ...chosen, name: text };
   }
 
   async function compareRoutes() {
@@ -126,63 +162,43 @@
     btn.disabled = true;
     options = [];
     renderOptions();
-    setStatus('Looking up trains…');
     try {
-      const search = { from: state.origin, to: state.destination, date: state.date, time: state.time, mode: state.timeMode, tz: state.tz };
+      setStatus('Finding the places…');
+      const [from, to, station] = await Promise.all(['origin', 'destination', 'via'].map(resolvePlace));
+      const search = { from, to, date: state.date, time: state.time, mode: state.timeMode, tz: state.tz };
+      setStatus('Looking up trains…');
       const res = await Transit.trainRoutes(search, setStatus);
       const pl = res.places;
-      const car = (pl && pl.car) || await Transit.drive(pl ? pl.start : state.origin, pl ? pl.goal : state.destination);
+      const car = (pl && pl.car) || await Transit.drive(pl ? pl.start : from, pl ? pl.goal : to);
       if (!car) { setStatus('Could not find a road route between these places. Try adding the city or country.', true); return; }
-
-      // Preferred station: find where it is, then trains that pass through it.
-      let viaRes = null, viaCoord = null;
-      if (state.via) {
-        setStatus(`Finding ${state.via}…`);
-        viaCoord = await Transit.geocode(state.via).catch(() => null);
-        if (!viaCoord) { const d = await Transit.drive(state.via, car.goal); viaCoord = d && d.start; }
-        if (!viaCoord) { setStatus(`Could not find "${state.via}". Try adding the city, e.g. "Kawagoe Station, Saitama".`, true); return; }
-        setStatus(`Looking up trains via ${state.via}…`);
-        viaRes = await Transit.trainRoutes({ ...search, via: { name: state.via, coord: viaCoord } }, setStatus);
-      }
-
-      setStatus('Checking drive times from stations along the way…');
-      const base = await trainOptions(res.routes || [], car, null);
       const when = Transit.zonedToUtc(state.date, state.time, state.tz);
       const carOpt = { id: 'car', title: 'Car all the way', route: carOnly(car, when) };
 
-      if (viaRes) {
-        const pref = await trainOptions(viaRes.routes || [], car, viaCoord);
-        const trainOpt = pref.train && { id: 'train', title: `Train via ${state.via}`, route: pref.train };
-        const comboOpt = pref.combo && {
-          id: 'combo', route: pref.combo,
-          title: Transit.km(pref.combo.legs[pref.combo.legs.length - 1].fromCoord, viaCoord) < 1
-            ? `Train to ${pref.combo.via} + car` : `Train via ${state.via} to ${pref.combo.via} + car`,
-        };
-        const rec = pickRecommended(trainOpt, comboOpt);
-        // For reference: the best way when not going through the preferred station.
-        const plainRec = pickRecommended(base.train && { id: 'train', title: 'Train all the way', route: base.train },
-          base.combo && { id: 'combo', title: `Train to ${base.combo.via} + car`, route: base.combo });
-        const ref = plainRec && { id: 'ref', title: `Not via ${state.via}: ${plainRec.title}`, route: plainRec.route };
-        options = [trainOpt, comboOpt, carOpt, ref].filter(Boolean);
-        if (rec) rec.recommended = true;
-        if (ref && rec) ref.diff = durMin(ref.route) - durMin(rec.route);
-        if (!trainOpt && !comboOpt) setStatus(`No trains found via ${state.via} for that time.`, true);
-      } else {
-        const trainOpt = base.train && { id: 'train', title: 'Train all the way', route: base.train };
-        const comboOpt = base.combo && { id: 'combo', title: `Train to ${base.combo.via} + car`, route: base.combo };
-        const rec = pickRecommended(trainOpt, comboOpt);
-        options = [trainOpt, comboOpt, carOpt].filter(Boolean);
-        if (rec) rec.recommended = true;
-        else carOpt.recommended = true;
-      }
-      const fastest = options.reduce((a, b) => (durMin(b.route) < durMin(a.route) ? b : a));
-      fastest.fastest = true;
+      setStatus('Checking drive times from stations along the way…');
+      const train = res.routes.length ? res.routes.reduce((a, b) => ((b.arr - b.dep) < (a.arr - a.dep) ? b : a)) : null;
+      const combo = res.routes.length ? await trainPlusCar(res.routes, car.start, car.goal) : null;
+      const trainOpt = train && { id: 'train', title: 'Train all the way', route: train };
+      const comboOpt = combo && { id: 'combo', title: `Train to ${combo.via} + car`, route: combo };
 
-      const anyTrains = options.some((o) => o.id === 'train' || o.id === 'combo');
-      const leftCount = (viaRes && viaRes.left) || res.left;
+      let pref = null, prefRes = null;
+      if (station) {
+        setStatus(`Looking up trains to ${state.via}…`);
+        const p = await trainToStationThenCar(search, station, car.goal);
+        prefRes = p.res;
+        if (p.route) pref = { id: 'pref', title: `Train to ${state.via} + car`, route: p.route };
+      }
+
+      const rec = pref || pickRecommended(trainOpt, comboOpt) || carOpt;
+      rec.recommended = true;
+      if (pref) [trainOpt, comboOpt].filter(Boolean).forEach((o) => { o.diff = durMin(o.route) - durMin(pref.route); });
+      options = [pref, trainOpt, comboOpt, carOpt].filter(Boolean);
+      options.reduce((a, b) => (durMin(b.route) < durMin(a.route) ? b : a)).fastest = true;
+
+      const leftCount = (prefRes && prefRes.left) || res.left;
       const left = leftCount != null ? ` NAVITIME searches left this month: ${leftCount}.` : '';
-      if (anyTrains) setStatus(`Trains from ${(viaRes || res).source}.${left} Pick an option to put it on the slide.`);
-      else if (!state.via) setStatus(`${Transit.reasonText(res.reason)} Showing the car option only.`, true);
+      if (station && !pref) setStatus(`No trains to ${state.via} found for that time — showing the other options.${left}`, true);
+      else if (trainOpt || pref) setStatus(`Trains from ${(prefRes || res).source}.${left} Pick an option to put it on the slide.`);
+      else setStatus(`${Transit.reasonText(res.reason)} Showing the car option only.`, true);
       renderOptions();
     } catch (err) {
       setStatus(err.message, true);
@@ -200,8 +216,8 @@
   }
 
   function optionNote(o) {
+    if (o.diff != null) return o.diff < 0 ? `${-o.diff} min faster than the recommended route` : o.diff > 0 ? `${o.diff} min slower than the recommended route` : 'same time as the recommended route';
     if (o.id === 'combo' && o.saving != null) return o.saving > 0 ? `${o.saving} min faster than train only` : `${-o.saving} min slower than train only`;
-    if (o.id === 'ref' && o.diff != null) return o.diff < 0 ? `${-o.diff} min faster than the recommended route` : o.diff > 0 ? `${o.diff} min slower than the recommended route` : 'same time as the recommended route';
     if (o.id === 'car') return fmtDist(o.route.legs[0].meters);
     return o.route.fare || '';
   }

@@ -106,14 +106,20 @@ const Transit = (function () {
     return json;
   }
 
-  // Place name -> { lat, lng, country } (country = 'jp' etc.), or null. Needs a Geoapify key.
-  async function geocode(text) {
-    if (!keys().geoapify || !text) return null;
-    return remembered(`place:${placeKey(text)}`, 90 * DAY_MS, async () => {
-      const json = await geoapify(`/v1/geocode/search?text=${encodeURIComponent(text)}&lang=en&limit=1&format=json`);
-      const r = json.results && json.results[0];
-      return r ? { lat: r.lat, lng: r.lon, country: r.country_code } : null;
-    });
+  // Place name -> up to 5 matches, best first: [{ lat, lng, country, label }]
+  // (country = 'jp' etc.; label = full address). Needs a Geoapify key.
+  async function placeMatches(text) {
+    if (!keys().geoapify || !text) return [];
+    return (await remembered(`places:${placeKey(text)}`, 90 * DAY_MS, async () => {
+      const json = await geoapify(`/v1/geocode/search?text=${encodeURIComponent(text)}&lang=en&limit=5&format=json`);
+      return (json.results || []).map((r) => ({ lat: r.lat, lng: r.lon, country: r.country_code, label: r.formatted }));
+    })) || [];
+  }
+
+  // A place: either already located ({ lat, lng, ... }) or a name -> its best match, or null.
+  async function geocode(place) {
+    if (place && typeof place === 'object') return place;
+    return (await placeMatches(place))[0] || null;
   }
 
   // Geoapify's drive times assume empty roads. Compared with Google's traffic-aware
@@ -347,5 +353,5 @@ const Transit = (function () {
     return 2 * R * Math.asin(Math.sqrt(h));
   }
 
-  return { keys, fmtDur, utcToZoned, zonedToUtc, drive, geocode, quickDriveTimes, trainRoutes, reasonText, summary, km, browserTz };
+  return { keys, fmtDur, utcToZoned, zonedToUtc, drive, geocode, placeMatches, quickDriveTimes, trainRoutes, reasonText, summary, km, browserTz };
 })();
