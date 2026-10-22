@@ -69,17 +69,19 @@ const Transit = (function () {
     if (v != null) {
       cache[key] = { t: Date.now(), v };
       const keysByAge = Object.keys(cache).sort((a, b) => cache[a].t - cache[b].t);
-      keysByAge.slice(0, Math.max(0, keysByAge.length - 400)).forEach((k) => delete cache[k]);
+      keysByAge.slice(0, Math.max(0, keysByAge.length - 200)).forEach((k) => delete cache[k]);
       App.store.set(CACHE_KEY, cache);
     }
     return v;
   }
   const placeKey = (p) => (typeof p === 'string' ? p.trim().toLowerCase() : `${p.lat.toFixed(4)},${p.lng.toFixed(4)}`);
 
-  // Drive between two places (address strings or { lat, lng }), traffic-aware from
-  // Google. Also tells us where Google placed the two ends. Null when there is no road route.
-  // Without a departure time the answer is a typical drive, so it is remembered for a week.
+  // Drive between two places (address strings or { lat, lng }) -> { secs, meters, start,
+  // goal, path | polyline }, or null when there is no road route. Uses Geoapify (free,
+  // adjusted for traffic) when there's a key, otherwise Google (traffic-aware).
+  // Typical drives (no departure time) are remembered for a week.
   async function drive(origin, destination, departAt) {
+    if (keys().geoapify) return remembered(`gdrive:${placeKey(origin)}>${placeKey(destination)}`, 7 * DAY_MS, () => geoapifyDrive(origin, destination));
     const fetcher = async () => {
       const body = { origin: waypoint(origin), destination: waypoint(destination), travelMode: 'DRIVE' };
       if (departAt && departAt > new Date()) { body.departureTime = departAt.toISOString(); body.routingPreference = 'TRAFFIC_AWARE'; }
@@ -114,14 +116,32 @@ const Transit = (function () {
     });
   }
 
-  // Drive estimates from many places to one, in a single request. These assume empty
-  // roads (about half of Google's times in Japan), so use them to rank, not to plan.
+  // Geoapify's drive times assume empty roads. Compared with Google's traffic-aware
+  // times around Tokyo/Saitama, short local drives took about 2.2x as long and a 70 km
+  // mostly-expressway drive about 1.2x, so times are scaled by distance:
+  //   3 km x2.2, 10 km x1.7, 20 km x1.4, 50 km+ x1.2.
+  const withTraffic = (secs, meters) => Math.round((secs * (1.2 + 1.4 * Math.exp(-meters / 10000))) / 60) * 60; // whole minutes
+
+  async function geoapifyDrive(origin, destination) {
+    const [a, b] = await Promise.all([typeof origin === 'string' ? geocode(origin) : origin, typeof destination === 'string' ? geocode(destination) : destination]);
+    if (!a || !b) return null;
+    const json = await geoapify(`/v1/routing?waypoints=${a.lat},${a.lng}|${b.lat},${b.lng}&mode=drive&format=json`);
+    const r = json.results && json.results[0];
+    if (!r) return null;
+    // Keep the road shape for the map, thinned to at most ~80 points.
+    const pts = (r.geometry || []).flat();
+    const step = Math.max(1, Math.ceil(pts.length / 80));
+    const path = pts.filter((p, i) => i % step === 0 || i === pts.length - 1).map((p) => ({ lat: +p.lat.toFixed(5), lng: +p.lon.toFixed(5) }));
+    return { secs: withTraffic(r.time, r.distance), meters: Math.round(r.distance), path, start: { lat: a.lat, lng: a.lng }, goal: { lat: b.lat, lng: b.lng } };
+  }
+
+  // Drive times (traffic-adjusted) from many places to one, in a single request.
   async function quickDriveTimes(origins, goal) {
     const json = await geoapify('/v1/routematrix', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ mode: 'drive', sources: origins.map((o) => ({ location: [o.lng, o.lat] })), targets: [{ location: [goal.lng, goal.lat] }] }),
     });
-    return (json.sources_to_targets || []).map((row) => (row && row[0] && row[0].time != null ? { secs: row[0].time, meters: row[0].distance } : null));
+    return (json.sources_to_targets || []).map((row) => (row && row[0] && row[0].time != null ? { secs: withTraffic(row[0].time, row[0].distance), meters: row[0].distance } : null));
   }
 
   const VEHICLE = {
@@ -174,12 +194,18 @@ const Transit = (function () {
       [mode === 'arrive' ? 'goal_time' : 'start_time']: `${date}T${time}:00`, limit: '5', options: 'railway_calling_at',
     });
     if (via) p.set('via', JSON.stringify([{ lat: via.coord.lat, lon: via.coord.lng }]));
-    const res = await fetch(`https://${NAVITIME_HOST}/route_transit?${p}`, {
-      headers: { 'X-RapidAPI-Key': keys().navitime, 'X-RapidAPI-Host': NAVITIME_HOST },
+    // The same search within 6 hours reuses the saved answer (NAVITIME's free plan is 500 a month).
+    let left = null;
+    const json = await remembered(`navitime:${p}`, 6 * 3600e3, async () => {
+      const res = await fetch(`https://${NAVITIME_HOST}/route_transit?${p}`, {
+        headers: { 'X-RapidAPI-Key': keys().navitime, 'X-RapidAPI-Host': NAVITIME_HOST },
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error('NAVITIME: ' + (body.message || res.statusText));
+      left = res.headers.get('x-ratelimit-requests-remaining');
+      return body;
     });
-    const json = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error('NAVITIME: ' + (json.message || res.statusText));
-    return { routes: (json.items || []).map(fromNavitime).filter(Boolean), left: res.headers.get('x-ratelimit-requests-remaining') };
+    return { routes: (json.items || []).map(fromNavitime).filter(Boolean), left };
   }
 
   function fromNavitime(item) {

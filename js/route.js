@@ -7,15 +7,11 @@
 (function () {
   const KEY = 'route.draft.v2';
   const MIN_SAVING_MIN = 15; // train + car must save this much over train only to be recommended
-  // Stations where the car could start: Geoapify ranks up to MAX_CANDIDATES in one
-  // request, then Google confirms the best CONFIRM_STATIONS with traffic-aware times.
-  // Without a Geoapify key, Google checks the NO_GEOAPIFY_STATIONS closest instead.
+  // Stations where the car could start: Geoapify rates up to MAX_CANDIDATES in one
+  // request (traffic-adjusted, see js/transit.js) and the best one gets a full route
+  // for the map. Without a Geoapify key, Google checks the NO_GEOAPIFY_STATIONS closest.
   const MAX_CANDIDATES = 25;
-  const CONFIRM_STATIONS = 3;
   const NO_GEOAPIFY_STATIONS = 5;
-  // Geoapify assumes empty roads; Google's real times were 1.6–2.4x longer in tests
-  // around Saitama. Doubling keeps far-away stations from being ranked too high.
-  const QUICK_DRIVE_FACTOR = 2;
 
   // Badge colour for each leg mode on the slide.
   const LEG_MODES = {
@@ -67,17 +63,14 @@
     return [...best.values()].sort((a, b) => a.guess - b.guess).slice(0, MAX_CANDIDATES);
   }
 
-  // Shortlist of stations worth a Google request: ranked by Geoapify's quick
-  // (empty-road) drive estimates when there's a key, else by the rough guess.
+  // Stations worth a full drive look-up: with Geoapify, the single best one from its
+  // one-request estimates; otherwise the closest few by the rough guess.
   async function shortlist(stations, goal) {
     if (!Transit.keys().geoapify) return stations.slice(0, NO_GEOAPIFY_STATIONS);
-    const quick = await Transit.quickDriveTimes(stations.map((s) => s.coord), goal).catch(() => null);
-    if (!quick) return stations.slice(0, NO_GEOAPIFY_STATIONS);
-    return stations
-      .map((s, i) => ({ s, est: quick[i] ? (s.arr - s.route.dep) + quick[i].secs * QUICK_DRIVE_FACTOR * 1000 : Infinity }))
-      .sort((a, b) => a.est - b.est)
-      .slice(0, CONFIRM_STATIONS)
-      .map((x) => x.s);
+    const quick = await Transit.quickDriveTimes(stations.map((s) => s.coord), goal);
+    const rated = stations.map((s, i) => ({ s, est: quick[i] ? (s.arr - s.route.dep) + quick[i].secs * 1000 : Infinity }));
+    rated.sort((a, b) => a.est - b.est);
+    return rated.length && rated[0].est < Infinity ? [rated[0].s] : [];
   }
 
   // The best "train to a station, then car" journey, or null.
@@ -98,7 +91,7 @@
     const legs = [
       ...s.route.legs.slice(0, s.legIndex),
       { ...ride, to: s.name, toCoord: s.coord, arr: s.arr, meters: ride.to === s.name ? ride.meters : 0, stops: ride.stops.filter((x) => x.arr < s.arr) },
-      { kind: 'car', mode: 'Car', line: '', from: s.name, to: state.destination, fromCoord: s.coord, toCoord: goal, dep: best.carDep, arr: best.arr, meters: d.meters, polyline: d.polyline, wait: state.pickup },
+      { kind: 'car', mode: 'Car', line: '', from: s.name, to: state.destination, fromCoord: s.coord, toCoord: goal, dep: best.carDep, arr: best.arr, meters: d.meters, polyline: d.polyline, path: d.path, wait: state.pickup },
     ];
     return { ...s.route, legs, arr: best.arr, fare: '', via: s.name };
   }
@@ -106,7 +99,7 @@
   function carOnly(car, when) {
     const dep = state.timeMode === 'arrive' ? new Date(when.getTime() - car.secs * 1000) : when;
     const arr = new Date(dep.getTime() + car.secs * 1000);
-    return { source: 'Google', dep, arr, fare: '', legs: [{ kind: 'car', mode: 'Car', line: '', from: state.origin, to: state.destination, fromCoord: car.start, toCoord: car.goal, dep, arr, meters: car.meters, polyline: car.polyline }] };
+    return { source: 'Google', dep, arr, fare: '', legs: [{ kind: 'car', mode: 'Car', line: '', from: state.origin, to: state.destination, fromCoord: car.start, toCoord: car.goal, dep, arr, meters: car.meters, polyline: car.polyline, path: car.path }] };
   }
 
   // Train all the way + the best train-and-car journey for a set of train routes.
@@ -126,7 +119,7 @@
 
   async function compareRoutes() {
     ['origin', 'destination', 'via', 'date', 'time'].forEach((id) => { state[id] = $(id).value.trim(); });
-    if (!Transit.keys().google) { $('keyNote').hidden = false; setStatus('Add your Google Maps API key on the Trip Schedule page first.', true); return; }
+    if (!Transit.keys().geoapify && !Transit.keys().google) { $('keyNote').hidden = false; setStatus('Add your Geoapify key (or a Google Maps key) on the Trip Schedule page first.', true); return; }
     if (!state.origin || !state.destination || !state.date || !state.time) { setStatus('Fill in From, To, Date and Time.', true); return; }
 
     const btn = $('compare');
@@ -279,9 +272,10 @@
       const seq = [l.fromCoord, ...(l.kind === 'car' ? [] : l.stops.map((s) => s.coord)), l.toCoord].filter(Boolean);
       all.push(...seq);
       if (l.kind === 'car') {
+        const road = l.path && l.path.length > 1 ? l.path : seq;
         geometries.push(l.polyline
           ? { type: 'polyline5', value: l.polyline, linecolor: '#2E86DE', linewidth: 5 }
-          : { type: 'polyline', value: seq.map(pt), linecolor: '#2E86DE', linewidth: 5 });
+          : { type: 'polyline', value: road.map(pt), linecolor: '#2E86DE', linewidth: 5 });
       } else if (seq.length > 1) {
         geometries.push(l.kind === 'walk'
           ? { type: 'polyline', value: seq.map(pt), linecolor: '#6B7280', linewidth: 3, linestyle: 'dashed' }
@@ -467,7 +461,7 @@
       $(id).value = state[id] ?? '';
       $(id).addEventListener('input', () => { state[id] = id === 'pickup' ? Number($(id).value) || 0 : $(id).value; refresh(); });
     });
-    $('keyNote').hidden = !!Transit.keys().google;
+    $('keyNote').hidden = !!(Transit.keys().geoapify || Transit.keys().google);
 
     $('compare').addEventListener('click', compareRoutes);
     $('addLeg').addEventListener('click', () => { state.legs.push({ mode: 'Walk', from: '', to: '', detail: '', duration: '', distance: '' }); renderTables(); refresh(); });
