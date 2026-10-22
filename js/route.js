@@ -319,8 +319,21 @@
     }
   }
 
+  // Map markers lettered in journey order: A = start (green), then where the car takes
+  // over from the train (blue), then the destination (red) — A → B → C, or A → B.
+  function mapMarkers(route) {
+    const first = route.legs[0].fromCoord, last = route.legs[route.legs.length - 1].toCoord;
+    const carLeg = route.legs.find((l) => l.kind === 'car');
+    const points = [
+      first && { coord: first, color: 'green', hex: '#27AE60' },
+      carLeg && carLeg !== route.legs[0] && carLeg.fromCoord && { coord: carLeg.fromCoord, color: 'blue', hex: '#2E86DE' },
+      last && { coord: last, color: 'red', hex: '#C0392B' },
+    ].filter(Boolean);
+    return points.map((p, i) => ({ ...p, label: 'ABC'[i] }));
+  }
+
   // Map picture: Geoapify when a key is set (free), otherwise Google Maps Static.
-  // Train lines in red, walks in grey, car in blue; A = start, B = end, C = where the car starts.
+  // Train lines in red, walks in grey, car in blue; markers from mapMarkers().
   async function mapPicture(route) {
     if (!Transit.keys().geoapify) return loadImage(googleMapUrl(route));
     const res = await fetch(`https://maps.geoapify.com/v1/staticmap?apiKey=${encodeURIComponent(Transit.keys().geoapify)}`, {
@@ -350,14 +363,7 @@
           : { type: 'polyline', value: seq.map(pt), linecolor: '#C0392B', linewidth: 5 });
       }
     });
-    const marker = (c, text, color) => ({ ...pt(c), text, color, type: 'material', size: 'large' });
-    const first = route.legs[0].fromCoord, last = route.legs[route.legs.length - 1].toCoord;
-    const carLeg = route.legs.find((l) => l.kind === 'car');
-    const markers = [
-      first && marker(first, 'A', '#27AE60'),
-      last && marker(last, 'B', '#C0392B'),
-      carLeg && carLeg !== route.legs[0] && carLeg.fromCoord && marker(carLeg.fromCoord, 'C', '#2E86DE'),
-    ].filter(Boolean);
+    const markers = mapMarkers(route).map((m) => ({ ...pt(m.coord), text: m.label, color: m.hex, type: 'material', size: 'large' }));
     // View: the whole route plus a margin; extra at the top because marker pins
     // are drawn above their point.
     const lats = all.map((c) => c.lat), lngs = all.map((c) => c.lng);
@@ -381,11 +387,7 @@
       const seq = [l.fromCoord, ...l.stops.map((s) => s.coord), l.toCoord].filter(Boolean);
       if (seq.length > 1) q.push('path=' + encodeURIComponent(`${l.kind === 'walk' ? 'color:0x6B7280ff|weight:3' : 'color:0xC0392Bff|weight:5'}|${seq.map(pt).join('|')}`));
     });
-    const first = route.legs[0].fromCoord, last = route.legs[route.legs.length - 1].toCoord;
-    if (first) q.push('markers=' + encodeURIComponent(`color:green|label:A|${pt(first)}`));
-    if (last) q.push('markers=' + encodeURIComponent(`color:red|label:B|${pt(last)}`));
-    const carLeg = route.legs.find((l) => l.kind === 'car');
-    if (carLeg && carLeg !== route.legs[0] && carLeg.fromCoord) q.push('markers=' + encodeURIComponent(`color:blue|label:C|${pt(carLeg.fromCoord)}`));
+    mapMarkers(route).forEach((m) => q.push('markers=' + encodeURIComponent(`color:${m.color}|label:${m.label}|${pt(m.coord)}`)));
     q.push('key=' + encodeURIComponent(Transit.keys().google));
     return 'https://maps.googleapis.com/maps/api/staticmap?' + q.join('&');
   }
