@@ -169,6 +169,7 @@ div.field { display: flex; flex-direction: column; gap: 4px; font-weight: 600; f
 .opt-card.recommended { border-color: var(--accent); background: #f2f8fe; }
 .opt-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
 .opt-time { font-weight: 600; margin-top: 4px; }
+.opt-warn { color: var(--danger); font-size: 12px; margin-top: 2px; }
 .opt-legs { margin: 6px 0 0; padding-left: 18px; color: var(--muted); font-size: 12px; }
 .badge { display: inline-block; font-size: 11px; font-weight: 600; padding: 1px 7px; border-radius: 10px; background: #e5e9f0; color: var(--text); margin-left: 4px; }
 .badge.rec { background: var(--accent); color: #fff; }
