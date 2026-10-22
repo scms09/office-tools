@@ -12,6 +12,7 @@
   // for the map. Without a Geoapify key, Google checks the NO_GEOAPIFY_STATIONS closest.
   const MAX_CANDIDATES = 25;
   const NO_GEOAPIFY_STATIONS = 5;
+  const MAX_CHANGE_WALK_MIN = 10; // longest acceptable walk between two trains
 
   // Badge colour for each leg mode on the slide.
   const LEG_MODES = {
@@ -40,34 +41,49 @@
   }
 
   // ---------- Comparing the options ----------
+  // Train routes are chosen by fewest changes first, then by time; routes with a walk
+  // of more than MAX_CHANGE_WALK_MIN at a change are left out.
+
+  // Routes whose walks at changes are short enough; if none are, all of them, marked.
+  function walkable(routes) {
+    const ok = routes.filter((r) => Transit.longestChangeWalk(r.legs) <= MAX_CHANGE_WALK_MIN);
+    return ok.length ? ok : routes.map((r) => ({ ...r, longWalk: true }));
+  }
+  const fewestChangesThenTime = (a, b) => a.changes - b.changes || a.time - b.time;
+
+  function bestTrain(routes) {
+    const rated = walkable(routes).map((r) => ({ r, changes: Transit.changes(r.legs), time: r.arr - r.dep }));
+    return rated.length ? rated.sort(fewestChangesThenTime)[0].r : null;
+  }
 
   // Stations along the train routes where you could get off and take a car for
   // the last stretch: only those within about a third of the trip (5–25 km) of
   // the destination, otherwise "train one stop, then drive" is just driving.
-  // Ordered by a rough guess (straight line at ~35 km/h).
+  // For each station, the way of getting there with the fewest changes is kept.
   function carStations(routes, start, goal) {
     const radius = Math.max(5, Math.min(25, Transit.km(start, goal) / 3));
     const best = new Map();
     routes.forEach((route) => route.legs.forEach((leg, legIndex) => {
       if (leg.kind !== 'ride') return;
+      const changes = Transit.changes(route.legs, legIndex);
       [...leg.stops, { name: leg.to, coord: leg.toCoord, arr: leg.arr }].forEach((s) => {
         if (!s.name || !s.coord || Transit.km(s.coord, goal) > radius) return;
-        const guess = (s.arr - route.dep) + (Transit.km(s.coord, goal) / 35) * 3600e3;
+        const guess = (s.arr - route.dep) + (Transit.km(s.coord, goal) / 35) * 3600e3; // rough: straight line at ~35 km/h
         const prev = best.get(s.name);
-        if (!prev || guess < prev.guess) best.set(s.name, { ...s, route, legIndex, guess });
+        if (!prev || changes < prev.changes || (changes === prev.changes && guess < prev.guess)) best.set(s.name, { ...s, route, legIndex, changes, guess });
       });
     }));
-    return [...best.values()].sort((a, b) => a.guess - b.guess).slice(0, MAX_CANDIDATES);
+    return [...best.values()].sort((a, b) => a.changes - b.changes || a.guess - b.guess).slice(0, MAX_CANDIDATES);
   }
 
-  // Stations worth a full drive look-up: with Geoapify, the single best one from its
-  // one-request estimates; otherwise the closest few by the rough guess.
+  // Stations worth a full drive look-up: with Geoapify, the single best one (fewest
+  // changes, then quickest by its one-request estimates); otherwise the first few.
   async function shortlist(stations, goal) {
     if (!Transit.keys().geoapify) return stations.slice(0, NO_GEOAPIFY_STATIONS);
     const quick = await Transit.quickDriveTimes(stations.map((s) => s.coord), goal);
-    const rated = stations.map((s, i) => ({ s, est: quick[i] ? (s.arr - s.route.dep) + quick[i].secs * 1000 : Infinity }));
-    rated.sort((a, b) => a.est - b.est);
-    return rated.length && rated[0].est < Infinity ? [rated[0].s] : [];
+    const rated = stations.map((s, i) => ({ s, changes: s.changes, time: quick[i] ? (s.arr - s.route.dep) + quick[i].secs * 1000 : Infinity }));
+    rated.sort(fewestChangesThenTime);
+    return rated.length && rated[0].time < Infinity ? [rated[0].s] : [];
   }
 
   // A car leg to the destination, leaving at dep; d = drive look-up result.
@@ -85,7 +101,8 @@
       const d = drives[i].status === 'fulfilled' && drives[i].value;
       if (!d) return;
       const car = carLeg(s.name, s.coord, goal, new Date(s.arr.getTime() + state.pickup * 60000), d, state.pickup);
-      if (!best || car.arr - s.route.dep < best.car.arr - best.s.route.dep) best = { s, car };
+      const better = !best || s.changes < best.s.changes || (s.changes === best.s.changes && car.arr - s.route.dep < best.car.arr - best.s.route.dep);
+      if (better) best = { s, car };
     });
     if (!best) return null;
     const { s, car } = best;
@@ -111,9 +128,12 @@
     }
     const res = await Transit.trainRoutes(s, setStatus);
     if (!res.routes.length) return { res, reason: res.reason };
-    const best = res.routes
-      .map((r) => ({ r, car: carLeg(state.via, d.start || r.legs[r.legs.length - 1].toCoord, goal, new Date(r.arr.getTime() + state.pickup * 60000), d, state.pickup) }))
-      .reduce((a, b) => (b.car.arr - b.r.dep < a.car.arr - a.r.dep ? b : a));
+    const best = walkable(res.routes)
+      .map((r) => {
+        const car = carLeg(state.via, d.start || r.legs[r.legs.length - 1].toCoord, goal, new Date(r.arr.getTime() + state.pickup * 60000), d, state.pickup);
+        return { r, car, changes: Transit.changes(r.legs), time: car.arr - r.dep };
+      })
+      .sort(fewestChangesThenTime)[0];
     const legs = best.r.legs.map((l) => (l.to ? l : { ...l, to: state.via })); // the walk into the station
     return { res, route: { ...best.r, arr: best.car.arr, legs: [...legs, best.car] } };
   }
@@ -175,8 +195,8 @@
       const carOpt = { id: 'car', title: 'Car all the way', route: carOnly(car, when) };
 
       setStatus('Checking drive times from stations along the way…');
-      const train = res.routes.length ? res.routes.reduce((a, b) => ((b.arr - b.dep) < (a.arr - a.dep) ? b : a)) : null;
-      const combo = res.routes.length ? await trainPlusCar(res.routes, car.start, car.goal) : null;
+      const train = bestTrain(res.routes);
+      const combo = res.routes.length ? await trainPlusCar(walkable(res.routes), car.start, car.goal) : null;
       const trainOpt = train && { id: 'train', title: 'Train all the way', route: train };
       const comboOpt = combo && { id: 'combo', title: `Train to ${combo.via} + car`, route: combo };
 
@@ -215,6 +235,12 @@
     return `${l.line} ${hm(l.dep)} → ${hm(l.arr)}: ${l.from} → ${l.to}`;
   }
 
+  function changesText(route) {
+    if (!route.legs.some((l) => l.kind === 'ride')) return '';
+    const n = Transit.changes(route.legs);
+    return n === 0 ? 'no changes' : n === 1 ? '1 change' : `${n} changes`;
+  }
+
   function optionNote(o) {
     if (o.diff != null) return o.diff < 0 ? `${-o.diff} min faster than the recommended route` : o.diff > 0 ? `${o.diff} min slower than the recommended route` : 'same time as the recommended route';
     if (o.id === 'combo' && o.saving != null) return o.saving > 0 ? `${o.saving} min faster than train only` : `${-o.saving} min slower than train only`;
@@ -231,7 +257,9 @@
         App.el('div', { class: 'opt-head' },
           App.el('div', {}, App.el('b', {}, o.title), ' ', badges),
           App.el('button', { type: 'button', class: 'btn small' + (o.recommended ? ' primary' : ''), onclick: () => useOption(o) }, 'Use on slide')),
-        App.el('div', { class: 'opt-time' }, `${hm(o.route.dep)} → ${hm(o.route.arr)} · ${Transit.fmtDur((o.route.arr - o.route.dep) / 1000)}`, optionNote(o) ? ` · ${optionNote(o)}` : ''),
+        App.el('div', { class: 'opt-time' }, `${hm(o.route.dep)} → ${hm(o.route.arr)} · ${Transit.fmtDur((o.route.arr - o.route.dep) / 1000)}`,
+          changesText(o.route) ? ` · ${changesText(o.route)}` : '', optionNote(o) ? ` · ${optionNote(o)}` : ''),
+        o.route.longWalk ? App.el('div', { class: 'opt-warn' }, `Every train option found has a walk of more than ${MAX_CHANGE_WALK_MIN} min at a change.`) : '',
         App.el('ul', { class: 'opt-legs' }, o.route.legs.map((l) => App.el('li', {}, legLine(l))))));
     });
     if (options.some((o) => o.id === 'combo')) {
@@ -253,7 +281,7 @@
   async function useOption(o) {
     const r = o.route;
     state.legs = r.legs.map(legRow);
-    state.comparison = options.map((x) => ({ mode: x.title + (x.recommended ? ' ★' : ''), duration: Transit.fmtDur((x.route.arr - x.route.dep) / 1000), distance: optionNote(x) }));
+    state.comparison = options.map((x) => ({ mode: x.title + (x.recommended ? ' ★' : ''), duration: Transit.fmtDur((x.route.arr - x.route.dep) / 1000), distance: [changesText(x.route), optionNote(x)].filter(Boolean).join(' · ') }));
     state.subtitle = `${o.title} · ${hm(r.dep)} → ${hm(r.arr)} · ${Transit.fmtDur((r.arr - r.dep) / 1000)}`;
     $('subtitle').value = state.subtitle;
     renderTables();

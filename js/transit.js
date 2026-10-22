@@ -198,6 +198,7 @@ const Transit = (function () {
     const p = new URLSearchParams({
       start: `${start.lat},${start.lng}`, goal: `${goal.lat},${goal.lng}`,
       [mode === 'arrive' ? 'goal_time' : 'start_time']: `${date}T${time}:00`, limit: '5', options: 'railway_calling_at',
+      order: 'transit', // fewest changes first
     });
     if (via) p.set('via', JSON.stringify([{ lat: via.coord.lat, lon: via.coord.lng }]));
     // The same search within 6 hours reuses the saved answer (NAVITIME's free plan is 500 a month).
@@ -345,6 +346,20 @@ const Transit = (function () {
     return rides.join('; ') + (route.fare ? ` · ${route.fare}` : '');
   }
 
+  // Number of train changes in the legs up to (and including) index upTo.
+  function changes(legs, upTo = legs.length - 1) {
+    return Math.max(0, legs.slice(0, upTo + 1).filter((l) => l.kind === 'ride').length - 1);
+  }
+  // Longest walk (minutes) between two rides, i.e. at a change. The walks at the very
+  // start and end of the trip don't count.
+  function longestChangeWalk(legs) {
+    const rides = legs.map((l, i) => (l.kind === 'ride' ? i : -1)).filter((i) => i >= 0);
+    if (rides.length < 2) return 0;
+    return legs.slice(rides[0], rides[rides.length - 1])
+      .filter((l) => l.kind === 'walk')
+      .reduce((m, l) => Math.max(m, (l.arr - l.dep) / 60000), 0);
+  }
+
   // Straight-line distance in km.
   function km(a, b) {
     const R = 6371, rad = Math.PI / 180;
@@ -353,5 +368,5 @@ const Transit = (function () {
     return 2 * R * Math.asin(Math.sqrt(h));
   }
 
-  return { keys, fmtDur, utcToZoned, zonedToUtc, drive, geocode, placeMatches, quickDriveTimes, trainRoutes, reasonText, summary, km, browserTz };
+  return { keys, fmtDur, utcToZoned, zonedToUtc, drive, geocode, placeMatches, quickDriveTimes, trainRoutes, reasonText, summary, km, changes, longestChangeWalk, browserTz };
 })();
